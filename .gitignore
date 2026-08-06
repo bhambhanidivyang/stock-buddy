@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Builds
+dist/
+build/
+.next/
+out/
+coverage/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Env
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# Temp
+.temp
+.tmp
+*.pid
+*.seed
+*.pid.lock
+
+# Docker / OCI
+backups/
+.env
+!.env.example

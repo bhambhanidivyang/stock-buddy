@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f3f6f4;
+  --foreground: #1c2421;
+  --accent: #0f766e;
+  --accent-deep: #115e59;
+  --panel: rgba(255, 255, 255, 0.86);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-manrope);
+  --font-display: var(--font-fraunces);
+}
+
+html {
+  height: 100%;
+  background-color: var(--background);
+}
+
+body {
+  /* Flat base — no mid-page linear band that reads as a “switch” */
+  background-color: var(--background);
+  background-image:
+    radial-gradient(
+      ellipse 70% 45% at 12% 0%,
+      rgba(15, 118, 110, 0.11),
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse 55% 35% at 100% 0%,
+      rgba(28, 36, 33, 0.045),
+      transparent 65%
+    );
+  background-repeat: no-repeat;
+  background-position: top left, top right;
+  /* Cover the viewport; fixed so long scroll never seams */
+  background-size: 100% 100vh;
+  background-attachment: fixed;
+  color: var(--foreground);
+  font-family: var(--font-manrope), ui-sans-serif, sans-serif;
+  min-height: 100%;
+}
+
+.font-display {
+  font-family: var(--font-fraunces), ui-serif, Georgia, serif;
+}

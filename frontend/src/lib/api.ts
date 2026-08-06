@@ -1,0 +1,305 @@
+import type {
+  AuthResponse,
+  AuthUser,
+  BalanceSnapshot,
+  ExecuteResult,
+  ExecuteStatus,
+  ExecuteStopResult,
+  PortfolioSnapshot,
+  RecommendationHistoryRun,
+  RecommendationRun,
+  ReviewTradeAction,
+  ReviewTradeResult,
+  StatementRow,
+} from "./types";
+import {
+  clearStoredAuth,
+  getMemorySession,
+  hydrateSessionFromStorage,
+  writeStoredAuth,
+} from "./session";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000";
+
+let refreshInFlight: Promise<string | null> | null = null;
+
+async function refreshAccessToken(): Promise<string | null> {
+  if (refreshInFlight) return refreshInFlight;
+
+  refreshInFlight = (async () => {
+    const session = getMemorySession() ?? hydrateSessionFromStorage();
+    if (!session?.refreshToken) {
+      clearStoredAuth();
+      return null;
+    }
+
+    const res = await fetch(`${API_URL}/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: session.refreshToken }),
+    });
+
+    if (!res.ok) {
+      clearStoredAuth();
+      return null;
+    }
+
+    const next = (await res.json()) as AuthResponse;
+    writeStoredAuth({
+      user: next.user,
+      accessToken: next.accessToken,
+      refreshToken: next.refreshToken,
+    });
+    return next.accessToken;
+  })().finally(() => {
+    refreshInFlight = null;
+  });
+
+  return refreshInFlight;
+}
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  retry = true,
+): Promise<T> {
+  const isAuthPublic =
+    path === "/auth/login" ||
+    path === "/auth/register" ||
+    path === "/auth/refresh";
+  const session = getMemorySession() ?? hydrateSessionFromStorage();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+
+  if (!isAuthPublic) {
+    const bearer =
+      headers.Authorization ??
+      (session?.accessToken ? `Bearer ${session.accessToken}` : undefined);
+    if (bearer) {
+      headers.Authorization = bearer;
+    }
+  }
+
+  const res = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers,
+  });
+
+  if (res.status === 401 && retry && !path.startsWith("/auth/")) {
+    const nextAccess = await refreshAccessToken();
+    if (nextAccess) {
+      return request<T>(
+        path,
+        {
+          ...init,
+          headers: {
+            ...(init?.headers as Record<string, string> | undefined),
+            Authorization: `Bearer ${nextAccess}`,
+          },
+        },
+        false,
+      );
+    }
+  }
+
+  if (!res.ok) {
+    let message = `Request failed (${res.status})`;
+    try {
+      const body = (await res.json()) as { message?: string | string[] };
+      if (Array.isArray(body.message)) {
+        message = body.message.join(", ");
+      } else if (body.message) {
+        message = body.message;
+      }
+    } catch {
+      // keep default message
+    }
+    throw new Error(message);
+  }
+
+  return res.json() as Promise<T>;
+}
+
+export function login(email: string, password: string) {
+  return request<AuthResponse>(
+    "/auth/login",
+    {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    },
+    false,
+  );
+}
+
+export function register(input: {
+  firstName: string;
+  lastName: string;
+  email: string;
+  password: string;
+}) {
+  return request<AuthResponse>(
+    "/auth/register",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+    false,
+  );
+}
+
+export function refreshSession(refreshToken: string) {
+  return request<AuthResponse>(
+    "/auth/refresh",
+    {
+      method: "POST",
+      body: JSON.stringify({ refreshToken }),
+    },
+    false,
+  );
+}
+
+export async function logout(accessToken?: string | null, refreshToken?: string | null) {
+  const session = getMemorySession() ?? hydrateSessionFromStorage();
+  const token = accessToken ?? session?.accessToken;
+  const refresh = refreshToken ?? session?.refreshToken;
+  try {
+    if (token) {
+      await request(
+        "/auth/logout",
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ refreshToken: refresh }),
+        },
+        false,
+      );
+    }
+  } finally {
+    clearStoredAuth();
+  }
+}
+
+export async function fetchStatements(_accessToken?: string | null) {
+  const rows = await request<
+    Array<
+      StatementRow & {
+        allocatedAmount?: number;
+      }
+    >
+  >("/statement");
+
+  return rows.map((row) => ({
+    date: row.date,
+    buyAmount: Number(row.buyAmount ?? row.allocatedAmount ?? 0) || 0,
+    sellAmount: Number(row.sellAmount ?? 0) || 0,
+    profitLoss: Number(row.profitLoss ?? 0) || 0,
+    cash: Number(row.cash ?? 0) || 0,
+    holdingsValue: Number(row.holdingsValue ?? 0) || 0,
+    stocksBought: row.stocksBought ?? "",
+    stocksSold: row.stocksSold ?? "",
+    holdings: row.holdings ?? "",
+  }));
+}
+
+export function fetchRecommendations(
+  _accessToken?: string | null,
+  limit = 50,
+) {
+  return request<RecommendationHistoryRun[]>(
+    `/recommendations?limit=${limit}`,
+  );
+}
+
+export function fetchRecommendation(
+  recommendationId: string,
+  _accessToken?: string | null,
+) {
+  return request<RecommendationHistoryRun>(
+    `/recommendations/${recommendationId}`,
+  );
+}
+
+export function createRecommendation(_accessToken?: string | null) {
+  return request<RecommendationRun>("/recommendations", {
+    method: "POST",
+  });
+}
+
+export function updateRecommendation(
+  recommendationId: string,
+  items: Array<{
+    id: string;
+    qty: number;
+    allocationInr: number;
+    buyLow: number;
+    buyHigh: number;
+    sellTarget: number;
+    stopLoss: number;
+  }>,
+  _accessToken?: string | null,
+) {
+  return request<RecommendationRun>(`/recommendations/${recommendationId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ items }),
+  });
+}
+
+export function executeTrades(
+  recommendationId: string,
+  _accessToken?: string | null,
+) {
+  return request<ExecuteResult>("/execute", {
+    method: "POST",
+    body: JSON.stringify({ recommendationId }),
+  });
+}
+
+export function fetchBalance(_accessToken?: string | null) {
+  return request<BalanceSnapshot>("/balance");
+}
+
+export function fetchPortfolio(_accessToken?: string | null) {
+  return request<PortfolioSnapshot>("/portfolio");
+}
+
+export function fetchExecuteStatus(_accessToken?: string | null) {
+  return request<ExecuteStatus>("/execute/status");
+}
+
+export function stopExecution(_accessToken?: string | null) {
+  return request<ExecuteStopResult>("/execute/stop", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export function reviewTrade(
+  tradeId: string,
+  input: {
+    action: ReviewTradeAction;
+    sellTarget?: number;
+    stopLoss?: number;
+  },
+  _accessToken?: string | null,
+) {
+  return request<ReviewTradeResult>(`/portfolio/${tradeId}/review`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchMe(_accessToken?: string | null) {
+  return request<AuthUser>("/auth/me");
+}
+
+export function triggerJob(
+  job: "nse_sync" | "recommend" | "execute" | "catchup",
+  _accessToken?: string | null,
+) {
+  return request<{ ok: boolean; job: string }>(`/jobs/trigger/${job}`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}

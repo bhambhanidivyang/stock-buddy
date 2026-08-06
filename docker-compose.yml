@@ -1,0 +1,74 @@
+# Stock Buddy — Oracle Cloud Free Tier / single VM
+# Postgres stays on the private compose network (no host port publish).
+# Backend + frontend publish ports for browser access.
+
+name: stock-buddy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: stock-buddy-postgres
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups
+    # Intentionally NOT published to the host — only reachable as hostname "postgres"
+    networks:
+      - stock-buddy-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stock-buddy-backend
+    env_file:
+      - .env
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      PORT: 3000
+    ports:
+      - "${BACKEND_HOST_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - stock-buddy-net
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Must be reachable from the user's browser (public IP / DNS), not "backend"
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3000}
+    container_name: stock-buddy-frontend
+    environment:
+      PORT: 3001
+      HOSTNAME: 0.0.0.0
+    ports:
+      - "${FRONTEND_HOST_PORT:-3001}:3001"
+    depends_on:
+      - backend
+    networks:
+      - stock-buddy-net
+    restart: unless-stopped
+
+networks:
+  stock-buddy-net:
+    driver: bridge
+
+volumes:
+  postgres_data:

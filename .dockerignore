@@ -1,0 +1,16 @@
+node_modules
+.next
+dist
+coverage
+.git
+.gitignore
+*.md
+!docs/DEPLOY-OCI.md
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env.local
+**/*.spec.ts
+**/agent-transcripts
+**/.cursor
