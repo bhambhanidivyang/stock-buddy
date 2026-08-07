@@ -20,4 +20,4 @@ COPY --from=build --chown=app:app /app/dist ./dist
 USER app
 EXPOSE 3000
 # migrationsRun=true in DatabaseModule applies schema on boot
-CMD ["node", "dist/main.js"]
+CMD ["node", "dist/src/main.js"]
