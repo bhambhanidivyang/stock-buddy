@@ -7,14 +7,20 @@
 # Example crontab (VM local time or UTC — adjust as needed):
 #   15 19 * * 1-5 /opt/stock-buddy/scripts/pg-backup.sh >> /var/log/stock-buddy-backup.log 2>&1
 #
-# Requires: docker compose, env POSTGRES_* from repo-root .env (or export them).
+# Requires: docker compose, env POSTGRES_* from backend/.env (or export them).
 
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT_DIR"
 
-if [ -f .env ]; then
+if [ -f backend/.env ]; then
+  # shellcheck disable=SC1091
+  set -a
+  . ./backend/.env
+  set +a
+elif [ -f .env ]; then
+  # legacy fallback
   # shellcheck disable=SC1091
   set -a
   . ./.env

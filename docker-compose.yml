@@ -9,7 +9,7 @@ services:
     image: postgres:16-alpine
     container_name: stock-buddy-postgres
     env_file:
-      - .env
+      - ./backend/.env
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -33,7 +33,7 @@ services:
       dockerfile: Dockerfile
     container_name: stock-buddy-backend
     env_file:
-      - .env
+      - ./backend/.env
     environment:
       DATABASE_HOST: postgres
       DATABASE_PORT: 5432

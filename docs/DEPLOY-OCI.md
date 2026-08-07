@@ -6,20 +6,17 @@ Frontend is **Next.js**. Backend is NestJS. Postgres runs only on the Compose ne
 
 ```text
 stock-buddy/
-  .env.example          # copy → .env (shared secrets)
-  .dockerignore
+  backend/
+    .env.example        # template → backend/.env (Nest + Compose)
+    Dockerfile
+  frontend/
+    Dockerfile
   docker-compose.yml    # postgres + backend + frontend
   backups/              # pg_dump output (gitignored volume mount)
   scripts/
     pg-backup.sh        # cron-ready daily dump
   docs/
     DEPLOY-OCI.md       # this file
-  backend/
-    Dockerfile
-    .dockerignore
-  frontend/
-    Dockerfile
-    .dockerignore
 ```
 
 ## Network model
@@ -47,20 +44,21 @@ Open ingress in OCI Security List / NSG for TCP **3000** and **3001** (and 22 fo
 git clone <your-repo> /opt/stock-buddy
 cd /opt/stock-buddy
 
-cp .env.example .env
-# Edit .env:
+cp backend/.env.example backend/.env
+# Edit backend/.env:
 #   POSTGRES_PASSWORD, JWT_SECRET, OPENAI_API_KEY
 #   FRONTEND_ORIGIN=http://YOUR_PUBLIC_IP:3001
 #   NEXT_PUBLIC_API_URL=http://YOUR_PUBLIC_IP:3000
+#   (optional) SCHEDULER_ENABLED=true
 
 mkdir -p backups
 chmod +x scripts/pg-backup.sh
 
-docker compose --env-file .env build
-docker compose --env-file .env up -d
+docker compose --env-file backend/.env build
+docker compose --env-file backend/.env up -d
 
-docker compose ps
-docker compose logs -f backend
+docker compose --env-file backend/.env ps
+docker compose --env-file backend/.env logs -f backend
 ```
 
 Open `http://YOUR_PUBLIC_IP:3001` → register → use the app.
@@ -80,15 +78,15 @@ Or enable `SCHEDULER_ENABLED=true` and wait for 18:30 IST.
 `NEXT_PUBLIC_API_URL` is baked at **frontend image build** time. If the public IP/URL changes:
 
 ```bash
-docker compose --env-file .env build --no-cache frontend
-docker compose --env-file .env up -d frontend
+docker compose --env-file backend/.env build --no-cache frontend
+docker compose --env-file backend/.env up -d frontend
 ```
 
 ## Backups (manual / cron)
 
 ```bash
 ./scripts/pg-backup.sh
-# writes backups/stockbuddy_YYYYMMDD_HHMMSS.sql.gz
+# writes backups/<db>_YYYYMMDD_HHMMSS.sql.gz
 ```
 
 Install cron yourself (example weekdays 19:15):
@@ -108,10 +106,10 @@ gunzip -c backups/stockbuddy_YYYYMMDD_HHMMSS.sql.gz \
 ## Useful commands
 
 ```bash
-docker compose logs -f
-docker compose restart backend
-docker compose down          # keeps postgres_data volume
-docker compose down -v       # DESTROYS DB volume — careful
+docker compose --env-file backend/.env logs -f
+docker compose --env-file backend/.env restart backend
+docker compose --env-file backend/.env down          # keeps postgres_data volume
+docker compose --env-file backend/.env down -v       # DESTROYS DB volume — careful
 ```
 
 ## Out of scope (by design for this pack)

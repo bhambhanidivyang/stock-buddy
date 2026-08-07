@@ -4,7 +4,7 @@ Paper-trading app to validate AI stock picks before real money.
 
 ```text
 stock-buddy/
-  backend/    NestJS API + Postgres
+  backend/    NestJS API + Postgres config (backend/.env)
   frontend/   Next.js UI
 ```
 
@@ -13,22 +13,32 @@ stock-buddy/
 - Node.js 22+ (local dev)
 - Docker + Compose (local Postgres **or** full stack)
 
+## Env (single file)
+
+```bash
+cp backend/.env.example backend/.env
+# set POSTGRES_*, JWT_SECRET, OPENAI_API_KEY, etc.
+```
+
+`backend/.env` is used by **local Nest** and **Docker Compose**. Do not create a root `.env`.
+
 ## Docker (OCI / single VM)
 
 Full stack (Postgres private + Nest API + Next.js UI). See **[docs/DEPLOY-OCI.md](docs/DEPLOY-OCI.md)**.
 
 ```bash
-cp .env.example .env   # set secrets + NEXT_PUBLIC_API_URL / FRONTEND_ORIGIN
-docker compose --env-file .env up -d --build
+cp backend/.env.example backend/.env   # if needed; set secrets + NEXT_PUBLIC_API_URL / FRONTEND_ORIGIN
+docker compose --env-file backend/.env up -d --build
 # UI http://localhost:3001  API http://localhost:3000
 ```
 
 ## Setup (local, API + UI on host)
 
 ```bash
-# DB only
-docker compose --env-file .env up -d postgres
-# If using root .env, set DATABASE_HOST=localhost for host-run Nest
+# DB only (Compose still reads backend/.env)
+docker compose --env-file backend/.env up -d postgres
+# Keep DATABASE_HOST=localhost in backend/.env for host-run Nest
+# (compose overrides HOST to "postgres" inside the API container)
 ```
 
 ```bash
@@ -57,7 +67,7 @@ Stock Buddy always uses the **full NSE EQ** universe (synced from NSE), not a fi
 curl -X POST http://localhost:3000/market/sync
 ```
 
-Pipeline: NSE universe → bhav ADTV filter → live Yahoo quotes → activity prioritizer (top N) → deep charts/levels + Yahoo sector/fundamentals → AI.
+Pipeline: NSE universe → bhav ADTV filter → live Yahoo quotes → research ranking (or legacy activity) → deep charts/levels → AI.
 
 ## Compounding / cash deploy
 
@@ -85,3 +95,5 @@ curl -X POST http://localhost:3000/jobs/trigger/nse_sync \
 ## Docs
 
 - API: [backend/docs/API.md](backend/docs/API.md)
+- Deploy: [docs/DEPLOY-OCI.md](docs/DEPLOY-OCI.md)
+- Position review (design): [docs/POSITION-REVIEW-ENGINE.md](docs/POSITION-REVIEW-ENGINE.md)
