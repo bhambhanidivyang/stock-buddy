@@ -32,10 +32,13 @@ docker compose --env-file backend/.env up -d --build
 # UI http://localhost:3001  API http://localhost:3000
 ```
 
+Postgres/JWT/OpenAI come from `backend/.env` via Compose `env_file` (no root `.env`).
+Pass `--env-file backend/.env` when you need custom `NEXT_PUBLIC_API_URL` / host ports at build time.
+
 ## Setup (local, API + UI on host)
 
 ```bash
-# DB only (Compose still reads backend/.env)
+# DB only
 docker compose --env-file backend/.env up -d postgres
 # Keep DATABASE_HOST=localhost in backend/.env for host-run Nest
 # (compose overrides HOST to "postgres" inside the API container)
