@@ -1,7 +1,12 @@
 import type { SectorMomentum, TrendLabel } from '../indicators';
+import type {
+  CandidateTradeStatus,
+  StatusReasonCode,
+} from '../levels/candidate-status';
 import type { SuggestedLevels, TradePlan } from '../levels/types';
 
 export type { SuggestedLevels, TradePlan };
+export type { CandidateTradeStatus, StatusReasonCode };
 
 export type CandidateQuoteBlock = {
   price: number;
@@ -69,9 +74,13 @@ export type Candidate = {
   technical: CandidateTechnical;
   structure: CandidateStructure;
   fundamentals: CandidateFundamentals;
-  /** VALID structure plan only; null if rejected / missing. */
+  /** BUYABLE / WATCH / RED after structural trade-plan classification. */
+  candidateStatus: CandidateTradeStatus;
+  statusReasonCode: StatusReasonCode;
+  statusReason: string | null;
+  /** GREEN/AMBER structure plan levels; null unless BUYABLE. */
   suggestedLevels: SuggestedLevels | null;
-  /** Full plan including REJECTED diagnostics for research funnel. */
+  /** Full plan including WATCH/RED diagnostics for research funnel. */
   tradePlan: TradePlan | null;
   technicalExtended: CandidateTechnicalExtended;
   metadata: {
@@ -84,10 +93,44 @@ export type Candidate = {
   };
 };
 
-export type AiFacingCandidate = Omit<Candidate, 'technicalExtended'> & {
+/** Compact plan for AI payload (omit bulky rejectionDetail / breakLevel). */
+export type AiFacingTradePlan = Pick<
+  TradePlan,
+  | 'setupType'
+  | 'entryReason'
+  | 'stopReason'
+  | 'targetReason'
+  | 'buyLow'
+  | 'buyHigh'
+  | 'stopLoss'
+  | 'sellTarget'
+  | 'risk'
+  | 'reward'
+  | 'riskReward'
+  | 'planQuality'
+  | 'validationStatus'
+  | 'rejectionCode'
+  | 'atrUsed'
+  | 'method'
+> & {
+  riskPercent?: number | null;
+  riskATR?: number | null;
+  extension?: number | null;
+};
+
+export type AiFacingCandidate = Omit<
+  Candidate,
+  'technicalExtended' | 'tradePlan'
+> & {
+  tradePlan: AiFacingTradePlan | TradePlan | null;
+  researchRank?: number;
+  riskPercent?: number | null;
+  riskATR?: number | null;
+  extension?: number | null;
   technicalExtended?: CandidateTechnicalExtended;
   research?: {
     researchScore: number;
+    rank?: number;
     reasons: string[];
     relativeStrengthScore?: number;
     trendScore?: number;
@@ -102,6 +145,38 @@ export type AiFacingCandidate = Omit<Candidate, 'technicalExtended'> & {
 export type EligibilityRejection = {
   symbol: string;
   reason: string;
+};
+
+export type RankingPoolDiagnostics = {
+  liquidCount: number;
+  return20Count: number;
+  return20Coverage: number;
+  minReturn20Coverage: number;
+  bhavSessionsNeeded: number;
+  eligibleSectors: string[];
+  inSectorCount: number;
+  outsideCount: number;
+  deepPoolSize: number;
+  deepPoolFirst: string | null;
+  deepPoolLast: string | null;
+  fallbackUsed: false;
+  failed: boolean;
+  failReason: string | null;
+};
+
+export type ResearchScoredRow = {
+  rank: number;
+  symbol: string;
+  sector: string;
+  overallScore: number;
+  relativeStrengthScore?: number | null;
+  trendScore?: number | null;
+  nearHighScore?: number | null;
+  persistenceScore?: number | null;
+  sectorScore?: number | null;
+  volumeScore?: number | null;
+  isWildcard?: boolean;
+  reasons: string[];
 };
 
 export type MarketContext = {
@@ -134,6 +209,8 @@ export type MarketContext = {
     advance5d: number;
     total: number;
   };
+  /** Ranking Stage-2 pool diagnostics (coverage, fail-closed reason, deep pool). */
+  rankingDiagnostics?: RankingPoolDiagnostics;
   sectorMomentum: Record<string, SectorMomentum>;
   technicalCoverage: {
     total: number;
@@ -172,6 +249,9 @@ export type PipelineFunnel = {
   shortlistMode?: string;
   researchPool?: number;
   eligibleSectors?: string[];
+  rankingFailed?: boolean;
+  rankingFailReason?: string | null;
+  return20Coverage?: number;
   /** Set after AI + validator in RecommendationsService */
   aiPicksProposed?: number;
   validatorAccepted?: number;
@@ -198,12 +278,16 @@ export type PriorityReasonRow = {
 /** Per-symbol outcome for the deep-checked shortlist (not the full liquid universe). */
 export type ShortlistOutcome = {
   symbol: string;
-  status: 'BUYABLE' | 'REJECTED';
+  status: CandidateTradeStatus;
+  reasonCode: StatusReasonCode;
   reason: string | null;
   buyLow?: number;
   buyHigh?: number;
   sellTarget?: number;
   stopLoss?: number;
+  riskReward?: number;
+  setupType?: string;
+  planQuality?: string;
 };
 
 export type CandidateBoard = {
@@ -220,4 +304,7 @@ export type CandidateBoard = {
   pipelineFunnel: PipelineFunnel;
   priorityShortlist: PriorityReasonRow[];
   shortlistOutcomes: ShortlistOutcome[];
+  /** Top scored names from ranking (up to 100) for audit — not only Top K shortlist. */
+  researchScoredTop?: ResearchScoredRow[];
+  rankingDiagnostics?: RankingPoolDiagnostics;
 };

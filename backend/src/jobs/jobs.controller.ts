@@ -20,18 +20,20 @@ export class JobsController {
     const name = job as JobParam;
     try {
       switch (name) {
-        case 'nse_sync':
-          await this.scheduler.runNseSync('manual');
-          return { ok: true, job: name };
+        case 'nse_sync': {
+          const result = await this.scheduler.runNseSync('manual');
+          return { ok: true, job: name, ...result };
+        }
         case 'recommend':
           await this.scheduler.runRecommend('manual');
-          return { ok: true, job: name };
+          return { ok: true, job: name, status: 'success' as const };
         case 'execute':
           await this.scheduler.runExecute('manual');
-          return { ok: true, job: name };
-        case 'catchup':
-          await this.scheduler.runCatchUp();
-          return { ok: true, job: name };
+          return { ok: true, job: name, status: 'success' as const };
+        case 'catchup': {
+          const result = await this.scheduler.runCatchUp();
+          return { ok: true, job: name, ...result };
+        }
         default:
           throw new BadRequestException(
             `Unknown job "${job}". Use nse_sync | recommend | execute | catchup`,

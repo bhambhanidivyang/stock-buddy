@@ -1,8 +1,14 @@
+import type { PlanQuality } from './plan-quality';
+
+export type { PlanQuality } from './plan-quality';
+
 export type SetupType =
   | 'PULLBACK_EMA20'
   | 'PULLBACK_PDH'
   | 'BREAKOUT_FRESH'
   | 'BREAKOUT_RETEST'
+  /** Objective structure anchor when no named textbook setup fires. */
+  | 'STRUCTURE'
   | 'NONE';
 
 export type ValidationStatus = 'VALID' | 'REJECTED';
@@ -19,6 +25,7 @@ export type RejectionCode =
   | 'NO_TARGET_STRUCTURE'
   | 'TARGET_NOT_ABOVE_ENTRY'
   | 'TARGET_UNREALISTIC_HORIZON'
+  | 'TARGET_TOO_CLOSE'
   | 'RR_TOO_LOW'
   | 'RR_INVALID';
 
@@ -59,6 +66,14 @@ export type RejectionDetail = {
   stopStructurePrice?: number;
   atrUsed?: number;
   message?: string;
+  /** Entry overshoot in ATR units (positive = above buyHigh). */
+  entryOvershootAtr?: number;
+  /** Stop risk as fraction of buyHigh. */
+  riskPct?: number;
+  /** Stop risk in ATR units. */
+  riskAtr?: number;
+  planQuality?: PlanQuality;
+  amberReasons?: string[];
 };
 
 export type TradePlan = {
@@ -75,6 +90,11 @@ export type TradePlan = {
   riskReward: number;
   atrUsed: number;
   method: 'STRUCTURE_ATR_V1';
+  /**
+   * GREEN/AMBER → VALID (levels usable).
+   * RED → REJECTED (hard reject, no levels to AI).
+   */
+  planQuality: PlanQuality;
   validationStatus: ValidationStatus;
   rejectionCode: RejectionCode | null;
   rejectionDetail: RejectionDetail;
@@ -82,7 +102,7 @@ export type TradePlan = {
   breakLevel: number | null;
 };
 
-/** Legacy-compatible slice used by OMS / validator (VALID plans only). */
+/** Levels passed to AI / OMS. VALID includes GREEN and AMBER plans. */
 export type SuggestedLevels = {
   buyLow: number;
   buyHigh: number;
@@ -97,6 +117,7 @@ export type SuggestedLevels = {
   targetReason: string;
   risk: number;
   reward: number;
+  planQuality: 'GREEN' | 'AMBER';
   validationStatus: 'VALID';
   rejectionCode: null;
   rejectionDetail: RejectionDetail;

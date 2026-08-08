@@ -11,6 +11,12 @@ import { UniverseSymbolRow } from '../../database/entities/universe-symbol.entit
 import type { UniverseStock } from '../providers/universe.provider';
 import { parseBhavCsv, splitCsvLine } from './bhav-csv';
 import {
+  BHAV_MAX_AGE_DAYS,
+  bhavCandidateCount,
+  isBhavSyncSatisfied,
+  toTradeDateKey,
+} from './bhav-sync';
+import {
   formatNseDate,
   nseFetch,
   recentTradeDateCandidates,
@@ -143,52 +149,61 @@ export class NseMarketService {
     return { snapshotId: snap.id, count: parsed.length, source };
   }
 
-  /** Ensure at least one recent bhav day is loaded; try downloading missing days. */
-  async ensureBhavSynced(lookbackDays = 20): Promise<{
+  /**
+   * Ensure bhav history depth + freshness for ranking/ADTV.
+   * Requires ≥ `lookbackSessions` distinct trade dates and a latest session
+   * newer than {@link BHAV_MAX_AGE_DAYS}. Fills gaps (skip existing days).
+   */
+  async ensureBhavSynced(lookbackSessions = 30): Promise<{
     tradeDate: string | null;
     rows: number;
+    sessions: number;
   }> {
-    const latest = await this.bhav
-      .createQueryBuilder('b')
-      .select('MAX(b.trade_date)', 'max')
-      .getRawOne<{ max: string | null }>();
-    if (latest?.max) {
-      const ageDays =
-        (Date.now() - new Date(latest.max).getTime()) / (24 * 60 * 60 * 1000);
-      if (ageDays < 3) {
-        const count = await this.bhav.count({ where: { tradeDate: latest.max } });
-        return { tradeDate: latest.max, rows: count };
-      }
-    }
+    const minSessions = Math.max(1, Math.floor(lookbackSessions));
+    const latestBefore = await this.getLatestBhavDate();
+    const sessionsBefore = await this.countDistinctTradeDates();
+    const satisfiedBefore = isBhavSyncSatisfied({
+      distinctSessions: sessionsBefore,
+      latestTradeDate: latestBefore,
+      minSessions,
+      maxAgeDays: BHAV_MAX_AGE_DAYS,
+    });
 
-    await warmNseSession();
-    let loadedDate: string | null = null;
-    let loadedRows = 0;
-    const candidates = recentTradeDateCandidates(new Date(), lookbackDays + 5);
+    // Always walk newest weekday candidates until we confirm minSessions
+    // (existing or newly downloaded). That fills 1–2 day gaps without
+    // re-downloading days already in the DB.
+    const candidates = recentTradeDateCandidates(
+      new Date(),
+      bhavCandidateCount(minSessions),
+    );
+    const candidateDates = candidates.map((d) => d.toISOString().slice(0, 10));
+    const existingSet = await this.getExistingTradeDates(candidateDates);
+
+    let confirmed = 0;
     let downloaded = 0;
-    for (const day of candidates) {
-      if (downloaded >= lookbackDays) {
+    let warmed = false;
+
+    for (let i = 0; i < candidates.length; i++) {
+      if (confirmed >= minSessions) {
         break;
       }
-      const ymd = formatNseDate(day);
-      const tradeDate = day.toISOString().slice(0, 10);
-      const existing = await this.bhav.count({ where: { tradeDate } });
-      if (existing > 0) {
-        downloaded += 1;
-        if (!loadedDate) {
-          loadedDate = tradeDate;
-          loadedRows = existing;
-        }
+      const day = candidates[i];
+      const tradeDate = candidateDates[i];
+      if (existingSet.has(tradeDate)) {
+        confirmed += 1;
         continue;
       }
+      if (!warmed) {
+        await warmNseSession();
+        warmed = true;
+      }
+      const ymd = formatNseDate(day);
       try {
         const n = await this.downloadAndStoreBhav(ymd, tradeDate);
         if (n > 0) {
+          existingSet.add(tradeDate);
+          confirmed += 1;
           downloaded += 1;
-          if (!loadedDate) {
-            loadedDate = tradeDate;
-            loadedRows = n;
-          }
         }
       } catch (error) {
         this.logger.warn(
@@ -196,15 +211,61 @@ export class NseMarketService {
         );
       }
     }
-    return { tradeDate: loadedDate, rows: loadedRows };
+
+    const tradeDate = await this.getLatestBhavDate();
+    const sessions = await this.countDistinctTradeDates();
+    const rows = tradeDate
+      ? await this.bhav.count({ where: { tradeDate } })
+      : 0;
+    const satisfied = isBhavSyncSatisfied({
+      distinctSessions: sessions,
+      latestTradeDate: tradeDate,
+      minSessions,
+      maxAgeDays: BHAV_MAX_AGE_DAYS,
+    });
+
+    this.logger.log(
+      `Bhav sync: sessions=${sessions}/${minSessions} latest=${tradeDate ?? 'null'} downloaded=${downloaded} rows=${rows} ready=${satisfied}${satisfiedBefore && downloaded === 0 ? ' (noop)' : ''}`,
+    );
+
+    return { tradeDate, rows, sessions };
   }
 
   async getLatestBhavDate(): Promise<string | null> {
     const latest = await this.bhav
       .createQueryBuilder('b')
       .select('MAX(b.trade_date)', 'max')
-      .getRawOne<{ max: string | null }>();
-    return latest?.max ?? null;
+      .getRawOne<{ max: string | Date | null }>();
+    if (latest?.max == null) {
+      return null;
+    }
+    const key = toTradeDateKey(latest.max);
+    return key || null;
+  }
+
+  private async countDistinctTradeDates(): Promise<number> {
+    const raw = await this.bhav
+      .createQueryBuilder('b')
+      .select('COUNT(DISTINCT b.trade_date)', 'n')
+      .getRawOne<{ n: string | number | null }>();
+    const n = Number(raw?.n ?? 0);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  private async getExistingTradeDates(
+    dates: string[],
+  ): Promise<Set<string>> {
+    if (dates.length === 0) {
+      return new Set();
+    }
+    const rows = await this.bhav
+      .createQueryBuilder('b')
+      .select('DISTINCT b.trade_date', 'd')
+      .where('b.trade_date IN (:...dates)', { dates })
+      .getRawMany<{ d: string | Date }>();
+    return new Set(
+      rows.map((r) => toTradeDateKey(r.d)).filter((d) => d.length > 0),
+    );
   }
 
   /** Average traded value over last N available sessions per symbol. */
@@ -274,7 +335,8 @@ export class NseMarketService {
     for (const row of rows) {
       const close = Number(row.close);
       if (!Number.isFinite(close)) continue;
-      const di = dateOrder.get(row.tradeDate);
+      const tradeKey = toTradeDateKey(row.tradeDate);
+      const di = dateOrder.get(tradeKey);
       if (di == null) continue;
       // di is index in DESC list; convert to ASC index
       const ascI = dates.length - 1 - di;
@@ -305,14 +367,17 @@ export class NseMarketService {
       .select('DISTINCT b.trade_date', 'd')
       .orderBy('b.trade_date', 'DESC')
       .limit(lookback)
-      .getRawMany<{ d: string }>();
-    return datesRaw.map((r) => r.d);
+      .getRawMany<{ d: string | Date }>();
+    return datesRaw
+      .map((r) => toTradeDateKey(r.d))
+      .filter((d) => d.length > 0);
   }
 
   async getBhavRowsForDate(
     tradeDate: string,
   ): Promise<Map<string, MarketBhavDaily>> {
-    const rows = await this.bhav.find({ where: { tradeDate } });
+    const key = toTradeDateKey(tradeDate);
+    const rows = await this.bhav.find({ where: { tradeDate: key } });
     return new Map(rows.map((r) => [r.symbol, r]));
   }
 

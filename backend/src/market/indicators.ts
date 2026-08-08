@@ -331,6 +331,25 @@ export function periodReturn(closes: number[], lookback: number): number | null 
   return roc(closes, lookback);
 }
 
+/**
+ * Simple return over `lookback` sessions as a fraction (0.05 = +5%).
+ * Prefer this for sector RS / ranking math. `periodReturn` / `roc` stay percent.
+ */
+export function simpleReturn(
+  closes: number[],
+  lookback: number,
+): number | null {
+  if (closes.length < lookback + 1) {
+    return null;
+  }
+  const prev = closes[closes.length - 1 - lookback];
+  const last = closes[closes.length - 1];
+  if (!(prev > 0) || !Number.isFinite(prev) || !Number.isFinite(last)) {
+    return null;
+  }
+  return last / prev - 1;
+}
+
 export function distToExtremePct(
   price: number,
   extreme: number | null,

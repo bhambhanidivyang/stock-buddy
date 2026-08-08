@@ -1,6 +1,6 @@
 import type { OhlcBar } from '../indicators';
 import { loadLevelsConfig } from './levels.config';
-import { buildTradePlan } from './trade-plan.engine';
+import { buildTradePlan, toSuggestedLevels } from './trade-plan.engine';
 
 /** Build a gentle uptrend with EMA-friendly path and clear swings. */
 function synthBars(): OhlcBar[] {
@@ -66,7 +66,7 @@ describe('buildTradePlan', () => {
     expect(plan.method).toBe('STRUCTURE_ATR_V1');
     if (plan.validationStatus === 'VALID') {
       expect(plan.buyHigh).not.toBe(ltp);
-      expect(plan.riskReward).toBeGreaterThanOrEqual(config.minTargetRr - 0.01);
+      expect(plan.riskReward).toBeGreaterThanOrEqual(1 - 0.01);
       expect(plan.stopLoss).toBeLessThan(plan.buyLow);
       expect(plan.buyHigh).toBeLessThan(plan.sellTarget);
     } else {
@@ -90,6 +90,8 @@ describe('buildTradePlan', () => {
       config,
     });
     expect(plan.validationStatus).toBe('REJECTED');
+    expect(plan.planQuality).toBe('RED');
     expect(plan.rejectionCode).toBe('INSUFFICIENT_FEATURES');
+    expect(toSuggestedLevels(plan)).toBeNull();
   });
 });

@@ -87,6 +87,26 @@ export type BuyableShortlistRow = {
   buyHigh: number | null;
   sellTarget: number | null;
   stopLoss: number | null;
+  riskReward?: number | null;
+  setupType?: string | null;
+};
+
+export type WatchShortlistRow = {
+  symbol: string;
+  reasonCode: string | null;
+  reason: string;
+  buyLow?: number | null;
+  buyHigh?: number | null;
+  sellTarget?: number | null;
+  stopLoss?: number | null;
+  riskReward?: number | null;
+  setupType?: string | null;
+};
+
+export type RedShortlistRow = {
+  symbol: string;
+  reasonCode: string | null;
+  reason: string;
 };
 
 export type RecommendationRun = {
@@ -110,15 +130,26 @@ export type RecommendationRun = {
   /** Size of priority shortlist sent to deep setup checks. */
   shortlistedCount?: number;
   buyableCount?: number;
+  watchCount?: number;
+  redCount?: number;
   setupRejectCount?: number;
   buyableBlockedReason?: "LOW_CASH" | "NO_BUYABLE_SETUPS" | null;
-  /** Shortlist names that already have entry/stop/target (pre-AI). */
+  /** Actionable structural plans (pre-AI). Strong ≠ buyable. */
   buyableShortlist?: BuyableShortlistRow[];
-  /** Why shortlisted names failed setup rules (independent of account cash). */
+  /** Strong names not attractive to buy at current levels. */
+  watchShortlist?: WatchShortlistRow[];
+  /** Hard data / history rejects. */
+  redShortlist?: RedShortlistRow[];
+  watchReasons?: SetupRejectReason[];
+  redReasons?: SetupRejectReason[];
+  /** Why shortlisted names are not buyable (WATCH + RED; legacy). */
   setupRejectReasons?: SetupRejectReason[];
-  /** Full shortlist rejects: symbol + reason. */
+  /** Full shortlist non-buyable rows (legacy). */
   setupRejects?: SetupRejectRow[];
   items: RecommendationItem[];
+  /** Sole customizable plan for today. */
+  isExecutablePlan?: boolean;
+  canMarkExecutable?: boolean;
   /** Present on history list/get responses. */
   createdAt?: string;
   bought?: boolean;
@@ -144,6 +175,10 @@ export type RecommendationHistoryRun = {
   bought: boolean;
   boughtLabel: string;
   executionSessionCount: number;
+  /** Today's PENDING plan that can become the Executable plan. */
+  canMarkExecutable?: boolean;
+  /** Currently the sole customizable plan. */
+  isExecutablePlan?: boolean;
   items: RecommendationItem[];
 };
 
@@ -268,13 +303,17 @@ export type ExecuteStopResult =
   | { status: "IDLE" }
   | { status: "STOPPED"; sessionId: string; stopReason?: string };
 
-export type ReviewTradeAction = "SELL" | "RESUME";
+export type ReviewTradeAction = "SELL" | "RESUME" | "MODIFY";
 
 export type ReviewTradeResult = {
   tradeId: string;
   symbol: string;
   action: ReviewTradeAction;
   status: string;
+  qty?: number;
+  qtySold?: number;
+  qtyRemaining?: number;
+  remainingTradeId?: string | null;
   sellTarget?: number;
   stopLoss?: number;
   sellPrice?: number;

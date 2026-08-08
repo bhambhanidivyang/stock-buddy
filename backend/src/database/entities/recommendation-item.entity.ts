@@ -5,7 +5,7 @@ import {
   Entity,
   JoinColumn,
   ManyToOne,
-  OneToOne,
+  OneToMany,
   PrimaryGeneratedColumn,
   Unique,
 } from 'typeorm';
@@ -68,6 +68,6 @@ export class RecommendationItem {
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 
-  @OneToOne(() => Trade, (trade) => trade.recommendationItem)
-  trade: Trade | null;
+  @OneToMany(() => Trade, (trade) => trade.recommendationItem)
+  trades: Trade[];
 }

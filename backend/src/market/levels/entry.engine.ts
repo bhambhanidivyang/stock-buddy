@@ -1,13 +1,16 @@
 import { round } from '../indicators';
 import type { LevelsConfig } from './levels.config';
+import type { PlanQuality } from './plan-quality';
 import type { RejectionCode, SetupType } from './types';
 
 export type EntryResult =
   | {
       ok: true;
+      quality: PlanQuality;
       buyLow: number;
       buyHigh: number;
       entryReason: string;
+      overshootAtr: number;
     }
   | {
       ok: false;
@@ -15,6 +18,7 @@ export type EntryResult =
       message: string;
       buyLow?: number;
       buyHigh?: number;
+      overshootAtr?: number;
     };
 
 export function buildEntryBand(input: {
@@ -52,6 +56,12 @@ export function buildEntryBand(input: {
     buyLow = round(breakLevel, 2);
     buyHigh = round(breakLevel + config.breakoutEntryAboveAtr * atr, 2);
     entryReason = 'BREAKOUT_FRESH entry band above breakout level';
+  } else if (setupType === 'STRUCTURE' && breakLevel != null) {
+    // Band around a real structure anchor (swing support / PDH / EMA20).
+    // Reuses pullback band widths — does not invent LTP±ATR momentum levels.
+    buyLow = round(breakLevel - config.emaBandBelowAtr * atr, 2);
+    buyHigh = round(breakLevel + config.emaPullbackAtr * atr, 2);
+    entryReason = input.setupReason || 'STRUCTURE entry band at market level';
   } else {
     return { ok: false, code: 'NO_SETUP', message: 'entry missing structure ref' };
   }
@@ -66,13 +76,17 @@ export function buildEntryBand(input: {
     };
   }
 
-  if (ltp > buyHigh + config.entryChaseAtr * atr) {
+  const overshootAtr = ltp > buyHigh ? (ltp - buyHigh) / atr : 0;
+  const amberAtr = Math.max(config.entryChaseAtr, config.entryAmberAtr);
+
+  if (ltp > buyHigh + amberAtr * atr) {
     return {
       ok: false,
       code: 'ENTRY_EXTENDED',
-      message: `LTP ${ltp} above buyHigh ${buyHigh}`,
+      message: `LTP ${ltp} above buyHigh ${buyHigh} (overshoot ${overshootAtr.toFixed(2)}ATR > amber ${amberAtr}ATR)`,
       buyLow,
       buyHigh,
+      overshootAtr: round(overshootAtr, 4),
     };
   }
   if (ltp < buyLow - config.entryMissedAtr * atr) {
@@ -82,8 +96,23 @@ export function buildEntryBand(input: {
       message: `LTP ${ltp} below buyLow ${buyLow}`,
       buyLow,
       buyHigh,
+      overshootAtr: round(overshootAtr, 4),
     };
   }
 
-  return { ok: true, buyLow, buyHigh, entryReason };
+  const quality: PlanQuality =
+    ltp > buyHigh + config.entryChaseAtr * atr ? 'AMBER' : 'GREEN';
+  const reason =
+    quality === 'AMBER'
+      ? `${entryReason} (amber: LTP ${overshootAtr.toFixed(2)}ATR above buyHigh)`
+      : entryReason;
+
+  return {
+    ok: true,
+    quality,
+    buyLow,
+    buyHigh,
+    entryReason: reason,
+    overshootAtr: round(overshootAtr, 4),
+  };
 }

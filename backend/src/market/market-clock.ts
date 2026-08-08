@@ -30,6 +30,11 @@ export function istDateKey(now = new Date()): string {
   return istParts(now).dateKey;
 }
 
+/** True when both timestamps fall on the same IST calendar day. */
+export function isSameIstTradingDay(a: Date, b: Date = new Date()): boolean {
+  return istDateKey(a) === istDateKey(b);
+}
+
 /** IST minutes since midnight */
 export function istMinutesSinceMidnight(now = new Date()): number {
   return istParts(now).mins;

@@ -1,4 +1,5 @@
 import { Controller, Logger, Post } from '@nestjs/common';
+import { loadRankingConfig } from '../config/ranking.config';
 import { NseMarketService } from './nse/nse-market.service';
 
 /** Manual / cron-friendly sync for NSE master + bhavcopy. */
@@ -10,9 +11,12 @@ export class MarketSyncController {
 
   @Post('sync')
   async sync() {
-    this.logger.log('Starting NSE universe + bhav sync');
+    const bhavSessions = loadRankingConfig().bhavLookbackSessions;
+    this.logger.log(
+      `Starting NSE universe + bhav sync (sessions≥${bhavSessions})`,
+    );
     const universe = await this.nse.ensureUniverseSynced();
-    const bhav = await this.nse.ensureBhavSynced(20);
+    const bhav = await this.nse.ensureBhavSynced(bhavSessions);
     return {
       universe,
       bhav,

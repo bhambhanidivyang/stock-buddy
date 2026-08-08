@@ -1,5 +1,7 @@
 export enum RecommendationRunStatus {
   PENDING = 'PENDING',
+  /** Sole customizable / executable plan for today (at most one per account). */
+  EXECUTABLE = 'EXECUTABLE',
   EXECUTING = 'EXECUTING',
   SUPERSEDED = 'SUPERSEDED',
   COMPLETED = 'COMPLETED',

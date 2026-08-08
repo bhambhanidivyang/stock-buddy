@@ -4,9 +4,14 @@ import { useMarketOpen } from "@/hooks/useMarketOpen";
 import { reviewTrade } from "@/lib/api";
 import { formatInr, formatPrice, pnlClass } from "@/lib/format";
 import type { HoldingRow, PortfolioSnapshot } from "@/lib/types";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
-type LevelDraft = { sellTarget: string; stopLoss: string };
+type DialogMode = "modify" | "sell" | "hold";
+
+type DialogState = {
+  mode: DialogMode;
+  row: HoldingRow;
+};
 
 type Props = {
   portfolio: PortfolioSnapshot | null;
@@ -27,18 +32,17 @@ export function PortfolioPanel({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<DialogState | null>(null);
 
-  async function onSell(
+  async function submitModify(
     row: HoldingRow,
     levels: { sellTarget: number; stopLoss: number },
   ) {
     const unchanged =
       levels.sellTarget === row.sellTarget && levels.stopLoss === row.stopLoss;
     if (unchanged) {
-      const ok = window.confirm(
-        `You haven’t changed the sell target or stop loss for ${row.symbol}.\n\nSell at the live mark anyway?`,
-      );
-      if (!ok) return;
+      window.alert("Change the sell target or stop loss before saving.");
+      return;
     }
 
     setActionError(null);
@@ -48,15 +52,50 @@ export function PortfolioPanel({
       const result = await reviewTrade(
         row.tradeId,
         {
-          action: "SELL",
+          action: "MODIFY",
           sellTarget: levels.sellTarget,
           stopLoss: levels.stopLoss,
         },
         accessToken,
       );
       setMessage(
-        `Sold ${result.symbol} @ ${formatPrice(result.sellPrice ?? 0)} · P&L ${formatInr(result.realizedPnl ?? 0)}`,
+        `Updated ${result.symbol} → T ${formatPrice(result.sellTarget ?? levels.sellTarget)} / SL ${formatPrice(result.stopLoss ?? levels.stopLoss)}`,
       );
+      setDialog(null);
+      onChanged();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Modify failed");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function submitSell(
+    row: HoldingRow,
+    input: { sellTarget: number; stopLoss: number; qty: number },
+  ) {
+    setActionError(null);
+    setMessage(null);
+    setBusyId(row.tradeId);
+    try {
+      const result = await reviewTrade(
+        row.tradeId,
+        {
+          action: "SELL",
+          sellTarget: input.sellTarget,
+          stopLoss: input.stopLoss,
+          qty: input.qty,
+        },
+        accessToken,
+      );
+      const sold = result.qtySold ?? input.qty;
+      const left = result.qtyRemaining ?? row.qty - sold;
+      setMessage(
+        left > 0
+          ? `Sold ${sold}× ${result.symbol} @ ${formatPrice(result.sellPrice ?? 0)} · left ${left} · P&L ${formatInr(result.realizedPnl ?? 0)}`
+          : `Sold ${sold}× ${result.symbol} @ ${formatPrice(result.sellPrice ?? 0)} · P&L ${formatInr(result.realizedPnl ?? 0)}`,
+      );
+      setDialog(null);
       onChanged();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Sell failed");
@@ -65,19 +104,10 @@ export function PortfolioPanel({
     }
   }
 
-  async function onHold(
+  async function submitHold(
     row: HoldingRow,
     levels: { sellTarget: number; stopLoss: number },
   ) {
-    const unchanged =
-      levels.sellTarget === row.sellTarget && levels.stopLoss === row.stopLoss;
-    if (unchanged) {
-      const ok = window.confirm(
-        `You haven’t changed the sell target or stop loss for ${row.symbol}.\n\nHold with the current levels (T ${formatPrice(row.sellTarget)} / SL ${formatPrice(row.stopLoss)})?`,
-      );
-      if (!ok) return;
-    }
-
     setActionError(null);
     setMessage(null);
     setBusyId(row.tradeId);
@@ -94,6 +124,7 @@ export function PortfolioPanel({
       setMessage(
         `Holding ${result.symbol} → OPEN (T ${formatPrice(result.sellTarget ?? levels.sellTarget)} / SL ${formatPrice(result.stopLoss ?? levels.stopLoss)})`,
       );
+      setDialog(null);
       onChanged();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Hold failed");
@@ -127,20 +158,18 @@ export function PortfolioPanel({
               : `${needsReview.length} stocks need review`}
           </h2>
           <p className="mt-2 text-sm leading-relaxed text-stone-700">
-            These lots are past the time-stop (or otherwise parked), so automation
-            has stopped exiting them. Adjust target/stop if needed, then{" "}
-            <span className="font-semibold text-stone-900">Sell</span> at the live
-            mark during NSE hours, or{" "}
-            <span className="font-semibold text-stone-900">Hold</span> to return the
-            lot to OPEN with those levels.
+            Automation has stopped exiting these lots. Use{" "}
+            <span className="font-semibold text-stone-900">Modify</span>,{" "}
+            <span className="font-semibold text-stone-900">Sell</span>, or{" "}
+            <span className="font-semibold text-stone-900">Hold</span> to decide.
           </p>
           <div className="mt-4">
-            <ReviewHoldingsTable
+            <HoldingsTable
               rows={needsReview}
               marketOpen={marketOpen}
               busyId={busyId}
-              onSell={onSell}
-              onHold={onHold}
+              variant="review"
+              onOpen={(mode, row) => setDialog({ mode, row })}
             />
           </div>
         </section>
@@ -169,7 +198,13 @@ export function PortfolioPanel({
         </div>
 
         {holdings.length > 0 ? (
-          <HoldingsTable rows={holdings} />
+          <HoldingsTable
+            rows={holdings}
+            marketOpen={marketOpen}
+            busyId={busyId}
+            variant="holdings"
+            onOpen={(mode, row) => setDialog({ mode, row })}
+          />
         ) : (
           <p className="text-sm text-stone-500">Book is flat.</p>
         )}
@@ -185,83 +220,61 @@ export function PortfolioPanel({
           {message}
         </p>
       ) : null}
+
+      {dialog ? (
+        <HoldingActionDialog
+          mode={dialog.mode}
+          row={dialog.row}
+          busy={busyId === dialog.row.tradeId}
+          marketOpen={marketOpen}
+          onClose={() => setDialog(null)}
+          onModify={submitModify}
+          onSell={submitSell}
+          onHold={submitHold}
+        />
+      ) : null}
     </div>
   );
 }
 
-function ReviewHoldingsTable({
+function HoldingsTable({
   rows,
   marketOpen,
   busyId,
-  onSell,
-  onHold,
+  variant,
+  onOpen,
 }: {
   rows: HoldingRow[];
   marketOpen?: boolean;
   busyId?: string | null;
-  onSell: (
-    row: HoldingRow,
-    levels: { sellTarget: number; stopLoss: number },
-  ) => void;
-  onHold: (
-    row: HoldingRow,
-    levels: { sellTarget: number; stopLoss: number },
-  ) => void;
+  variant: "review" | "holdings";
+  onOpen: (mode: DialogMode, row: HoldingRow) => void;
 }) {
-  const [drafts, setDrafts] = useState<Record<string, LevelDraft>>(() =>
-    draftsFromRows(rows),
-  );
-
-  useEffect(() => {
-    setDrafts(draftsFromRows(rows));
-  }, [rows]);
-
-  function parseLevels(row: HoldingRow): {
-    ok: true;
-    sellTarget: number;
-    stopLoss: number;
-  } | { ok: false; error: string } {
-    const draft = drafts[row.tradeId] ?? {
-      sellTarget: String(row.sellTarget),
-      stopLoss: String(row.stopLoss),
-    };
-    const sellTarget = Number(draft.sellTarget);
-    const stopLoss = Number(draft.stopLoss);
-    if (!Number.isFinite(sellTarget) || !Number.isFinite(stopLoss)) {
-      return { ok: false, error: "Enter valid target and stop prices." };
-    }
-    if (sellTarget <= stopLoss) {
-      return { ok: false, error: "Sell target must be above stop loss." };
-    }
-    return { ok: true, sellTarget, stopLoss };
-  }
-
-  function runAction(
-    row: HoldingRow,
-    action: "sell" | "hold",
-  ) {
-    const parsed = parseLevels(row);
-    if (!parsed.ok) {
-      window.alert(parsed.error);
-      return;
-    }
-    if (action === "sell") {
-      onSell(row, parsed);
-    } else {
-      onHold(row, parsed);
-    }
-  }
+  const shell =
+    variant === "review"
+      ? "overflow-x-auto rounded-xl border border-amber-200/70 bg-white/90 shadow-sm"
+      : "overflow-x-auto rounded-xl border border-stone-200 bg-white/80 shadow-sm";
+  const thead =
+    variant === "review"
+      ? "border-b border-amber-100 bg-amber-50/80 text-xs uppercase tracking-wide text-stone-500"
+      : "border-b border-stone-200 bg-stone-50/90 text-xs uppercase tracking-wide text-stone-500";
+  const rowBorder =
+    variant === "review"
+      ? "border-b border-amber-50 last:border-0"
+      : "border-b border-stone-100 last:border-0";
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-amber-200/70 bg-white/90 shadow-sm">
+    <div className={shell}>
       <table className="min-w-full text-left text-sm">
-        <thead className="border-b border-amber-100 bg-amber-50/80 text-xs uppercase tracking-wide text-stone-500">
+        <thead className={thead}>
           <tr>
             <th className="px-4 py-3 font-medium">Symbol</th>
+            {variant === "holdings" ? (
+              <th className="px-4 py-3 font-medium">Status</th>
+            ) : null}
             <th className="px-4 py-3 font-medium">Qty</th>
             <th className="px-4 py-3 font-medium">Buy / Mark</th>
-            <th className="px-4 py-3 font-medium">Sell target</th>
-            <th className="px-4 py-3 font-medium">Stop loss</th>
+            <th className="px-4 py-3 font-medium">Target / Stop</th>
             <th className="px-4 py-3 font-medium">MTM</th>
             <th className="px-4 py-3 font-medium">Unrealized</th>
             <th className="px-4 py-3 font-medium">Actions</th>
@@ -269,68 +282,33 @@ function ReviewHoldingsTable({
         </thead>
         <tbody>
           {rows.map((row) => {
-            const draft = drafts[row.tradeId] ?? {
-              sellTarget: String(row.sellTarget),
-              stopLoss: String(row.stopLoss),
-            };
             const busy = busyId === row.tradeId;
+            const showHold = row.status === "NEEDS_REVIEW";
 
             return (
-              <tr
-                key={row.tradeId}
-                className="border-b border-amber-50 last:border-0"
-              >
+              <tr key={row.tradeId} className={rowBorder}>
                 <td className="px-4 py-3 font-medium text-stone-900">
                   {row.symbol}
                   <span className="ml-2 text-xs font-normal text-stone-500">
                     {row.role}
                   </span>
                 </td>
+                {variant === "holdings" ? (
+                  <td className="px-4 py-3">
+                    <StatusPill
+                      status={row.status}
+                      review={row.needsHumanReview}
+                    />
+                  </td>
+                ) : null}
                 <td className="px-4 py-3 tabular-nums text-stone-700">
                   {row.qty}
                 </td>
                 <td className="px-4 py-3 tabular-nums text-stone-700">
                   {formatPrice(row.buyPrice)} / {formatPrice(row.currentPrice)}
                 </td>
-                <td className="px-4 py-3">
-                  <input
-                    type="number"
-                    step="any"
-                    inputMode="decimal"
-                    value={draft.sellTarget}
-                    disabled={busy}
-                    onChange={(e) =>
-                      setDrafts((prev) => ({
-                        ...prev,
-                        [row.tradeId]: {
-                          ...draft,
-                          sellTarget: e.target.value,
-                        },
-                      }))
-                    }
-                    className="w-28 rounded-md border border-stone-300 bg-white px-2 py-1.5 text-sm tabular-nums text-stone-900 outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500 disabled:opacity-60"
-                    aria-label={`${row.symbol} sell target`}
-                  />
-                </td>
-                <td className="px-4 py-3">
-                  <input
-                    type="number"
-                    step="any"
-                    inputMode="decimal"
-                    value={draft.stopLoss}
-                    disabled={busy}
-                    onChange={(e) =>
-                      setDrafts((prev) => ({
-                        ...prev,
-                        [row.tradeId]: {
-                          ...draft,
-                          stopLoss: e.target.value,
-                        },
-                      }))
-                    }
-                    className="w-28 rounded-md border border-stone-300 bg-white px-2 py-1.5 text-sm tabular-nums text-stone-900 outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500 disabled:opacity-60"
-                    aria-label={`${row.symbol} stop loss`}
-                  />
+                <td className="px-4 py-3 tabular-nums text-stone-700">
+                  {formatPrice(row.sellTarget)} / {formatPrice(row.stopLoss)}
                 </td>
                 <td className="px-4 py-3 tabular-nums text-stone-700">
                   {formatInr(row.marketValue)}
@@ -344,25 +322,35 @@ function ReviewHoldingsTable({
                   <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
+                      disabled={busy}
+                      onClick={() => onOpen("modify", row)}
+                      className="rounded-md border border-stone-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-stone-800 hover:bg-stone-50 disabled:opacity-45"
+                    >
+                      Modify
+                    </button>
+                    <button
+                      type="button"
                       disabled={busy || !marketOpen}
                       title={
                         marketOpen
                           ? "Paper sell at live Yahoo mark"
                           : "Sell only while NSE is open"
                       }
-                      onClick={() => runAction(row, "sell")}
+                      onClick={() => onOpen("sell", row)}
                       className="rounded-md bg-rose-800 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-rose-900 disabled:cursor-not-allowed disabled:opacity-45"
                     >
-                      {busy ? "…" : "Sell"}
+                      Sell
                     </button>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => runAction(row, "hold")}
-                      className="rounded-md border border-stone-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-stone-800 hover:bg-stone-50 disabled:opacity-45"
-                    >
-                      Hold
-                    </button>
+                    {showHold ? (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => onOpen("hold", row)}
+                        className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs font-semibold text-amber-950 hover:bg-amber-100 disabled:opacity-45"
+                      >
+                        Hold
+                      </button>
+                    ) : null}
                   </div>
                 </td>
               </tr>
@@ -374,61 +362,351 @@ function ReviewHoldingsTable({
   );
 }
 
-function draftsFromRows(rows: HoldingRow[]): Record<string, LevelDraft> {
-  const next: Record<string, LevelDraft> = {};
-  for (const row of rows) {
-    next[row.tradeId] = {
-      sellTarget: String(row.sellTarget),
-      stopLoss: String(row.stopLoss),
-    };
-  }
-  return next;
-}
+function HoldingActionDialog({
+  mode,
+  row,
+  busy,
+  marketOpen,
+  onClose,
+  onModify,
+  onSell,
+  onHold,
+}: {
+  mode: DialogMode;
+  row: HoldingRow;
+  busy: boolean;
+  marketOpen?: boolean;
+  onClose: () => void;
+  onModify: (
+    row: HoldingRow,
+    levels: { sellTarget: number; stopLoss: number },
+  ) => void;
+  onSell: (
+    row: HoldingRow,
+    input: { sellTarget: number; stopLoss: number; qty: number },
+  ) => void;
+  onHold: (
+    row: HoldingRow,
+    levels: { sellTarget: number; stopLoss: number },
+  ) => void;
+}) {
+  const titleId = useId();
+  const firstFieldRef = useRef<HTMLInputElement>(null);
+  const [sellTarget, setSellTarget] = useState(String(row.sellTarget));
+  const [stopLoss, setStopLoss] = useState(String(row.stopLoss));
+  const [sellQty, setSellQty] = useState(String(row.qty));
+  const [formError, setFormError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<{
+    sellTarget?: string;
+    stopLoss?: string;
+    sellQty?: string;
+  }>({});
 
-function HoldingsTable({ rows }: { rows: HoldingRow[] }) {
+  useEffect(() => {
+    setSellTarget(String(row.sellTarget));
+    setStopLoss(String(row.stopLoss));
+    setSellQty(String(row.qty));
+    setFormError(null);
+    setFieldErrors({});
+  }, [row, mode]);
+
+  useEffect(() => {
+    firstFieldRef.current?.focus();
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !busy) onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  const title =
+    mode === "modify"
+      ? `Modify ${row.symbol}`
+      : mode === "sell"
+        ? `Sell ${row.symbol}`
+        : `Hold ${row.symbol}`;
+
+  const maxUnits = row.qty;
+
+  function validatePrices(rawTarget: string, rawStop: string): {
+    ok: true;
+    sellTarget: number;
+    stopLoss: number;
+  } | {
+    ok: false;
+    errors: { sellTarget?: string; stopLoss?: string };
+  } {
+    const errors: { sellTarget?: string; stopLoss?: string } = {};
+    const t = Number(String(rawTarget).trim());
+    const s = Number(String(rawStop).trim());
+
+    if (String(rawTarget).trim() === "" || !Number.isFinite(t)) {
+      errors.sellTarget = "Enter a valid sell target price.";
+    } else if (!(t > 0)) {
+      errors.sellTarget = "Sell target must be greater than 0.";
+    }
+
+    if (String(rawStop).trim() === "" || !Number.isFinite(s)) {
+      errors.stopLoss = "Enter a valid stop loss price.";
+    } else if (!(s > 0)) {
+      errors.stopLoss = "Stop loss must be greater than 0.";
+    }
+
+    if (!errors.sellTarget && !errors.stopLoss && t <= s) {
+      errors.sellTarget = "Must be above stop loss.";
+      errors.stopLoss = "Must be below sell target.";
+    }
+
+    if (errors.sellTarget || errors.stopLoss) {
+      return { ok: false, errors };
+    }
+    return { ok: true, sellTarget: t, stopLoss: s };
+  }
+
+  function validateQty(rawQty: string):
+    | { ok: true; qty: number }
+    | { ok: false; error: string } {
+    const trimmed = String(rawQty).trim();
+    if (trimmed === "") {
+      return { ok: false, error: `Enter units to sell (1–${maxUnits}).` };
+    }
+    const asNum = Number(trimmed);
+    if (!Number.isFinite(asNum)) {
+      return { ok: false, error: "Units must be a number." };
+    }
+    if (!Number.isInteger(asNum)) {
+      return { ok: false, error: "Units must be a whole number (no decimals)." };
+    }
+    if (asNum < 1) {
+      return { ok: false, error: "Units must be at least 1." };
+    }
+    if (asNum > maxUnits) {
+      return {
+        ok: false,
+        error: `You can sell at most ${maxUnits} unit${maxUnits === 1 ? "" : "s"}.`,
+      };
+    }
+    return { ok: true, qty: asNum };
+  }
+
+  function submit() {
+    setFormError(null);
+    setFieldErrors({});
+
+    if (mode === "sell") {
+      if (!marketOpen) {
+        setFormError("Sell only while NSE is open (09:15–15:30 IST).");
+        return;
+      }
+      const prices = validatePrices(sellTarget, stopLoss);
+      const qty = validateQty(sellQty);
+      const nextErrors: {
+        sellTarget?: string;
+        stopLoss?: string;
+        sellQty?: string;
+      } = {};
+      if (!prices.ok) Object.assign(nextErrors, prices.errors);
+      if (!qty.ok) nextErrors.sellQty = qty.error;
+      if (Object.keys(nextErrors).length > 0) {
+        setFieldErrors(nextErrors);
+        return;
+      }
+      if (prices.ok && qty.ok) {
+        onSell(row, {
+          sellTarget: prices.sellTarget,
+          stopLoss: prices.stopLoss,
+          qty: qty.qty,
+        });
+      }
+      return;
+    }
+
+    const prices = validatePrices(sellTarget, stopLoss);
+    if (!prices.ok) {
+      setFieldErrors(prices.errors);
+      return;
+    }
+    if (mode === "modify") onModify(row, prices);
+    else onHold(row, prices);
+  }
+
+  const inputClass = (hasError?: string) =>
+    `w-full rounded-md border px-3 py-2 text-sm tabular-nums text-stone-900 outline-none focus:ring-1 disabled:opacity-60 ${
+      hasError
+        ? "border-rose-400 focus:border-rose-500 focus:ring-rose-400"
+        : "border-stone-300 focus:border-teal-500 focus:ring-teal-500"
+    }`;
+
   return (
-    <div className="overflow-x-auto rounded-xl border border-stone-200 bg-white/80 shadow-sm">
-      <table className="min-w-full text-left text-sm">
-        <thead className="border-b border-stone-200 bg-stone-50/90 text-xs uppercase tracking-wide text-stone-500">
-          <tr>
-            <th className="px-4 py-3 font-medium">Symbol</th>
-            <th className="px-4 py-3 font-medium">Status</th>
-            <th className="px-4 py-3 font-medium">Qty</th>
-            <th className="px-4 py-3 font-medium">Buy / Mark</th>
-            <th className="px-4 py-3 font-medium">Target / Stop</th>
-            <th className="px-4 py-3 font-medium">MTM</th>
-            <th className="px-4 py-3 font-medium">Unrealized</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.tradeId} className="border-b border-stone-100 last:border-0">
-              <td className="px-4 py-3 font-medium text-stone-900">
-                {row.symbol}
-                <span className="ml-2 text-xs font-normal text-stone-500">
-                  {row.role}
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-stone-900/40 p-4 sm:items-center"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !busy) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="w-full max-w-md rounded-2xl border border-stone-200 bg-white p-5 shadow-xl"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 id={titleId} className="text-base font-semibold text-stone-900">
+              {title}
+            </h3>
+            <p className="mt-1 text-sm text-stone-600">
+              Holding {maxUnits} unit{maxUnits === 1 ? "" : "s"} · mark{" "}
+              {formatPrice(row.currentPrice)} · buy {formatPrice(row.buyPrice)}
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onClose}
+            className="rounded-md px-2 py-1 text-sm text-stone-500 hover:bg-stone-100 hover:text-stone-800 disabled:opacity-45"
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="mt-4 space-y-3">
+          <label className="block text-sm text-stone-700">
+            <span className="mb-1 block font-medium">Sell target (₹)</span>
+            <input
+              ref={firstFieldRef}
+              type="number"
+              step="any"
+              min={0.01}
+              inputMode="decimal"
+              value={sellTarget}
+              disabled={busy}
+              onChange={(e) => {
+                setSellTarget(e.target.value);
+                setFieldErrors((prev) => ({ ...prev, sellTarget: undefined }));
+              }}
+              className={inputClass(fieldErrors.sellTarget)}
+              aria-invalid={Boolean(fieldErrors.sellTarget)}
+            />
+            {fieldErrors.sellTarget ? (
+              <span className="mt-1 block text-xs text-rose-700">
+                {fieldErrors.sellTarget}
+              </span>
+            ) : null}
+          </label>
+
+          <label className="block text-sm text-stone-700">
+            <span className="mb-1 block font-medium">Stop loss (₹)</span>
+            <input
+              type="number"
+              step="any"
+              min={0.01}
+              inputMode="decimal"
+              value={stopLoss}
+              disabled={busy}
+              onChange={(e) => {
+                setStopLoss(e.target.value);
+                setFieldErrors((prev) => ({ ...prev, stopLoss: undefined }));
+              }}
+              className={inputClass(fieldErrors.stopLoss)}
+              aria-invalid={Boolean(fieldErrors.stopLoss)}
+            />
+            {fieldErrors.stopLoss ? (
+              <span className="mt-1 block text-xs text-rose-700">
+                {fieldErrors.stopLoss}
+              </span>
+            ) : null}
+          </label>
+
+          {mode === "sell" ? (
+            <>
+              <label className="block text-sm text-stone-700">
+                <span className="mb-1 block font-medium">
+                  Units to sell (max {maxUnits})
                 </span>
-              </td>
-              <td className="px-4 py-3">
-                <StatusPill status={row.status} review={row.needsHumanReview} />
-              </td>
-              <td className="px-4 py-3 tabular-nums text-stone-700">{row.qty}</td>
-              <td className="px-4 py-3 tabular-nums text-stone-700">
-                {formatPrice(row.buyPrice)} / {formatPrice(row.currentPrice)}
-              </td>
-              <td className="px-4 py-3 tabular-nums text-stone-700">
-                {formatPrice(row.sellTarget)} / {formatPrice(row.stopLoss)}
-              </td>
-              <td className="px-4 py-3 tabular-nums text-stone-700">
-                {formatInr(row.marketValue)}
-              </td>
-              <td className={`px-4 py-3 tabular-nums ${pnlClass(row.unrealizedPnl)}`}>
-                {formatInr(row.unrealizedPnl)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+                <input
+                  type="number"
+                  min={1}
+                  max={maxUnits}
+                  step={1}
+                  inputMode="numeric"
+                  value={sellQty}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setSellQty(e.target.value);
+                    setFieldErrors((prev) => ({
+                      ...prev,
+                      sellQty: undefined,
+                    }));
+                  }}
+                  className={inputClass(fieldErrors.sellQty)}
+                  aria-invalid={Boolean(fieldErrors.sellQty)}
+                />
+                {fieldErrors.sellQty ? (
+                  <span className="mt-1 block text-xs text-rose-700">
+                    {fieldErrors.sellQty}
+                  </span>
+                ) : (
+                  <span className="mt-1 block text-xs text-stone-500">
+                    You can sell 1–{maxUnits} unit
+                    {maxUnits === 1 ? "" : "s"} from this lot.
+                  </span>
+                )}
+              </label>
+              <p className="text-xs text-stone-500">
+                Fills at the live Yahoo mark during NSE hours. If you sell
+                fewer than {maxUnits}, remaining units keep the levels you
+                set above.
+              </p>
+            </>
+          ) : (
+            <p className="rounded-md bg-stone-50 px-3 py-2 text-xs text-stone-600">
+              Lot size: <span className="font-medium text-stone-800">{maxUnits}</span>{" "}
+              unit{maxUnits === 1 ? "" : "s"}
+              {mode === "hold"
+                ? " — Hold returns this lot to OPEN with the levels above."
+                : " — Modify updates target/stop for the full lot."}
+            </p>
+          )}
+
+          {formError ? (
+            <p className="text-sm text-rose-700" role="alert">
+              {formError}
+            </p>
+          ) : null}
+        </div>
+
+        <div className="mt-5 flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onClose}
+            className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-medium text-stone-800 hover:bg-stone-50 disabled:opacity-45"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={busy || (mode === "sell" && !marketOpen)}
+            onClick={submit}
+            className={
+              mode === "sell"
+                ? "rounded-md bg-rose-800 px-3 py-2 text-sm font-semibold text-white hover:bg-rose-900 disabled:cursor-not-allowed disabled:opacity-45"
+                : "rounded-md bg-teal-800 px-3 py-2 text-sm font-semibold text-white hover:bg-teal-900 disabled:opacity-45"
+            }
+          >
+            {busy
+              ? "…"
+              : mode === "modify"
+                ? "Save levels"
+                : mode === "sell"
+                  ? "Confirm sell"
+                  : "Confirm hold"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -6,6 +6,7 @@ import {
   relativeStrength,
   roc,
   rsi,
+  simpleReturn,
   volumeMultiple,
 } from './indicators';
 
@@ -32,6 +33,14 @@ describe('indicators', () => {
     const stock = Array.from({ length: 25 }, (_, i) => 100 + i);
     const bench = Array.from({ length: 25 }, () => 100);
     expect(relativeStrength(stock, bench, 20)).not.toBeNull();
+  });
+
+  it('simpleReturn is fraction; roc/periodReturn remain percent', () => {
+    const closes = Array.from({ length: 21 }, (_, i) => 100 + i);
+    // 120/100 - 1 = 0.2
+    expect(simpleReturn(closes, 20)).toBeCloseTo(0.2, 8);
+    expect(roc(closes, 20)).toBeCloseTo(20, 2);
+    expect(simpleReturn(closes.slice(0, 20), 20)).toBeNull();
   });
 
   it('computes ATR / MACD / Bollinger / ROC', () => {

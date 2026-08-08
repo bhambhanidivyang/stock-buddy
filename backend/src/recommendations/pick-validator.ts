@@ -6,6 +6,7 @@ import {
 } from '../config/recommendation.config';
 import { roundMoney } from '../common/money';
 import type { SuggestedLevels } from '../market/features/candidate.types';
+import { MIN_BUYABLE_STRUCTURAL_RR } from '../market/levels/candidate-status';
 import { normalizeNseSymbol } from '../market/symbols';
 
 const logger = new Logger('PickValidator');
@@ -104,11 +105,12 @@ export function normalizePicks(
     const risk = buyHigh - stopLoss;
     const reward = sellTarget - buyHigh;
     const rr = risk > 0 ? reward / risk : 0;
-    const minRr = config.levels?.minTargetRr ?? config.minTargetRr;
+    // Soft structural floor only — green/amber RR are quality signals, not hard gates.
+    const minRr = MIN_BUYABLE_STRUCTURAL_RR;
     if (!(risk > 0) || rr < minRr - 0.01) {
       pushReject(
         symbol,
-        `risk/reward @buyHigh ${rr.toFixed(2)}:1 < ${minRr}:1`,
+        `risk/reward @buyHigh ${rr.toFixed(2)}:1 < ${minRr}:1 soft floor`,
       );
       continue;
     }

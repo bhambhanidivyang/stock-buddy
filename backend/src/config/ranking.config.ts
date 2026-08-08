@@ -35,6 +35,16 @@ export type RankingConfig = {
   wEvent: number;
   /** How many Yahoo deep-history wildcard candidates to consider outside top sectors. */
   wildcardCandidatePool: number;
+  /**
+   * Bhav sessions to sync/fetch for cheap return20/return5 preview.
+   * Must be >= rsLbSwing + 1 (periodReturn/simpleReturn need lookback+1 closes).
+   */
+  bhavLookbackSessions: number;
+  /**
+   * Minimum fraction of liquid quotes with non-null return20 before ranking proceeds.
+   * Below this → fail closed (empty shortlist); never alphabetical fallback.
+   */
+  minReturn20Coverage: number;
 };
 
 function requireNum(env: NodeJS.ProcessEnv, key: string): number {
@@ -102,6 +112,18 @@ export function loadRankingConfig(
     );
   }
 
+  const rsLbSwing = Math.max(1, Math.floor(requireNum(env, 'RANK_RS_LB_SWING')));
+  const bhavLookbackSessions = Math.max(
+    rsLbSwing + 1,
+    Math.floor(requireNum(env, 'RANK_BHAV_LOOKBACK')),
+  );
+  const minReturn20Coverage = requireNum(env, 'RANK_MIN_RETURN20_COVERAGE');
+  if (minReturn20Coverage < 0 || minReturn20Coverage > 1) {
+    throw new Error(
+      `RANK_MIN_RETURN20_COVERAGE must be in [0,1] (got ${minReturn20Coverage})`,
+    );
+  }
+
   return {
     featureVersion: RANK_FEATURE_VERSION,
     configVersion: RANK_CONFIG_VERSION,
@@ -123,7 +145,7 @@ export function loadRankingConfig(
     regimeNoTradeEnabled: requireBool(env, 'RANK_REGIME_NOTRADE_ENABLED'),
     skipDayRs20: requireBool(env, 'RANK_SKIP_DAY_RS20'),
     rsLbShort: Math.max(1, Math.floor(requireNum(env, 'RANK_RS_LB_SHORT'))),
-    rsLbSwing: Math.max(1, Math.floor(requireNum(env, 'RANK_RS_LB_SWING'))),
+    rsLbSwing,
     rsLbIntermediate: Math.max(
       1,
       Math.floor(requireNum(env, 'RANK_RS_LB_INTERMEDIATE')),
@@ -145,5 +167,7 @@ export function loadRankingConfig(
       0,
       Math.floor(requireNum(env, 'RANK_WILDCARD_CANDIDATE_POOL')),
     ),
+    bhavLookbackSessions,
+    minReturn20Coverage,
   };
 }

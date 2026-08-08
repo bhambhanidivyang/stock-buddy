@@ -10,7 +10,7 @@ import {
 export const SCHEMA_VERSION = 1;
 export const FEATURE_VERSION = 3;
 export const CONFIG_VERSION = 6;
-export const PROMPT_VERSION = 'portfolio-manager-v7-research-rank';
+export const PROMPT_VERSION = 'portfolio-manager-v8-buyable-watch-red';
 
 export type StrategyProfile = 'day' | 'swing';
 

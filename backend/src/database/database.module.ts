@@ -18,6 +18,7 @@ import { AddRecommendationPortfolioMeta1754080000000 } from './migrations/175408
 import { AddRefreshTokens1754600000000 } from './migrations/1754600000000-AddRefreshTokens';
 import { AddSchedulerRuns1754700000000 } from './migrations/1754700000000-AddSchedulerRuns';
 import { AddAccountUserId1754800000000 } from './migrations/1754800000000-AddAccountUserId';
+import { AllowMultipleTradesPerItem1754900000000 } from './migrations/1754900000000-AllowMultipleTradesPerItem';
 import { AddUniverseAndBhav1754500000000 } from './migrations/1754500000000-AddUniverseAndBhav';
 import { CreateUsers1754040000000 } from './migrations/1754040000000-CreateUsers';
 import { InitSchema1753470000000 } from './migrations/1753470000000-InitSchema';
@@ -58,6 +59,7 @@ import { InitSchema1753470000000 } from './migrations/1753470000000-InitSchema';
           AddRefreshTokens1754600000000,
           AddSchedulerRuns1754700000000,
           AddAccountUserId1754800000000,
+          AllowMultipleTradesPerItem1754900000000,
         ],
       }),
     }),

@@ -22,7 +22,7 @@ import {
   TradeExitReason,
   TradeStatus,
 } from '../database/enums';
-import { istDateKey } from '../market/market-clock';
+import { isSameIstTradingDay, istDateKey } from '../market/market-clock';
 import { YahooService } from '../market/yahoo.service';
 import { ExecutionLoopService } from './execution-loop.service';
 
@@ -82,7 +82,7 @@ export class ExecuteService implements OnModuleInit {
       : await this.runs.findOne({
           where: {
             accountId: account.id,
-            status: RecommendationRunStatus.PENDING,
+            status: RecommendationRunStatus.EXECUTABLE,
           },
           order: { createdAt: 'DESC' },
         });
@@ -91,20 +91,20 @@ export class ExecuteService implements OnModuleInit {
       throw new NotFoundException(
         recommendationId
           ? `Recommendation ${recommendationId} not found`
-          : 'No PENDING recommendation found. Call POST /recommendations first.',
+          : 'No Executable plan found. Generate a recommendation and Mark as Executable Plan first.',
       );
     }
 
     if (
-      run.status !== RecommendationRunStatus.PENDING &&
+      run.status !== RecommendationRunStatus.EXECUTABLE &&
       run.status !== RecommendationRunStatus.EXECUTING
     ) {
       throw new BadRequestException(
-        `Recommendation ${run.id} is ${run.status} and cannot be executed`,
+        `Recommendation ${run.id} is ${run.status}. Mark it as the Executable plan first (today's plans only).`,
       );
     }
 
-    if (!isSameIstTradingDay(run.marketTs, new Date())) {
+    if (!isSameIstTradingDay(new Date(run.marketTs), new Date())) {
       throw new BadRequestException(
         `Recommendation ${run.id} is not from today's IST trading day (marketTs=${run.marketTs.toISOString()}). Generate a fresh plan.`,
       );
@@ -155,14 +155,17 @@ export class ExecuteService implements OnModuleInit {
         }
       }
 
-      // Supersede other pending runs so latest execute is unambiguous next time
+      // Supersede other unused today's plans so only this session remains active
       await manager
         .createQueryBuilder()
         .update(RecommendationRun)
         .set({ status: RecommendationRunStatus.SUPERSEDED })
         .where('account_id = :accountId', { accountId: account.id })
-        .andWhere('status = :status', {
-          status: RecommendationRunStatus.PENDING,
+        .andWhere('status IN (:...statuses)', {
+          statuses: [
+            RecommendationRunStatus.PENDING,
+            RecommendationRunStatus.EXECUTABLE,
+          ],
         })
         .andWhere('id != :runId', { runId: run.id })
         .execute();
@@ -517,16 +520,6 @@ export class ExecuteService implements OnModuleInit {
       stopReason: session.stopReason,
     };
   }
-}
-
-function isSameIstTradingDay(a: Date, b: Date): boolean {
-  const fmt = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
-  return fmt.format(a) === fmt.format(b);
 }
 
 function istDayBoundsUtc(now = new Date()): { start: Date; end: Date } {

@@ -5,7 +5,6 @@ import {
   Index,
   JoinColumn,
   ManyToOne,
-  OneToOne,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
@@ -35,10 +34,10 @@ export class Trade {
   @JoinColumn({ name: 'account_id' })
   account: Account;
 
-  @Column({ name: 'recommendation_item_id', type: 'uuid', unique: true })
+  @Column({ name: 'recommendation_item_id', type: 'uuid' })
   recommendationItemId: string;
 
-  @OneToOne(() => RecommendationItem, (item) => item.trade, {
+  @ManyToOne(() => RecommendationItem, (item) => item.trades, {
     onDelete: 'RESTRICT',
   })
   @JoinColumn({ name: 'recommendation_item_id' })

@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { AccountService } from '../account/account.service';
+import { loadRankingConfig } from '../config/ranking.config';
 import { ExecuteService } from '../execute/execute.service';
 import {
   isIstWeekday,
@@ -13,6 +14,11 @@ import { loadSchedulerConfig } from './scheduler.config';
 import { SchedulerRunStore } from './scheduler-run.store';
 
 const TZ = 'Asia/Kolkata';
+
+export type ManualJobResult = {
+  status: 'success' | 'skipped';
+  detail: string;
+};
 
 @Injectable()
 export class TradingSchedulerService implements OnModuleInit {
@@ -65,50 +71,80 @@ export class TradingSchedulerService implements OnModuleInit {
     await this.runExecute('cron');
   }
 
-  async runCatchUp(): Promise<void> {
+  async runCatchUp(): Promise<ManualJobResult> {
     if (!isIstWeekday()) {
       this.logger.log('Catch-up skipped (weekend IST)');
-      return;
+      return {
+        status: 'skipped',
+        detail:
+          'Catch-up runs on weekdays only (Indian market days). Try again Monday–Friday.',
+      };
     }
 
     const mins = istMinutesSinceMidnight();
     const config = loadSchedulerConfig();
+    const ran: string[] = [];
 
     // After evening sync window
     if (mins >= 18 * 60 + 30) {
-      await this.runNseSync('catchup');
+      const sync = await this.runNseSync('catchup');
+      ran.push(`market data (${sync.status})`);
     }
 
     // After recommend window
     if (mins >= 8 * 60 + 45) {
       await this.runRecommend('catchup');
+      ran.push('recommendations');
     }
 
     // After execute window
     if (config.autoExecute && mins >= 9 * 60 + 14) {
       await this.runExecute('catchup');
+      ran.push('execution');
     }
+
+    if (ran.length === 0) {
+      return {
+        status: 'skipped',
+        detail:
+          'Nothing is due yet for this time of day. Catch-up only runs steps whose scheduled time has already passed.',
+      };
+    }
+
+    return {
+      status: 'success',
+      detail: `Catch-up finished: ${ran.join(', ')}.`,
+    };
   }
 
-  async runNseSync(trigger: string): Promise<void> {
+  async runNseSync(trigger: string): Promise<ManualJobResult> {
     const runDate = istDateKey();
     const claimed = await this.store.claim('nse_sync', runDate);
     if (!claimed) {
       this.logger.log(`nse_sync skipped (${trigger}) — already claimed for ${runDate}`);
-      return;
+      return {
+        status: 'skipped',
+        detail: `Market data was already synced for ${runDate}.`,
+      };
     }
 
     this.logger.log(`nse_sync start (${trigger}) ${runDate}`);
     try {
+      const bhavSessions = loadRankingConfig().bhavLookbackSessions;
       const universe = await this.nse.syncEquityMaster();
-      const bhav = await this.nse.ensureBhavSynced(20);
-      const detail = `universe=${universe.count} bhavDate=${bhav.tradeDate ?? 'null'} rows=${bhav.rows}`;
+      const bhav = await this.nse.ensureBhavSynced(bhavSessions);
+      const detail = `universe=${universe.count} bhavDate=${bhav.tradeDate ?? 'null'} sessions=${bhav.sessions} rows=${bhav.rows}`;
       if (!bhav.tradeDate || bhav.rows <= 0) {
         await this.store.complete('nse_sync', runDate, 'failed', detail);
         throw new Error(`NSE bhav sync produced no rows (${detail})`);
       }
       await this.store.complete('nse_sync', runDate, 'success', detail);
       this.logger.log(`nse_sync ok (${trigger}) ${detail}`);
+      const latestLabel = formatTradeDateLabel(bhav.tradeDate);
+      return {
+        status: 'success',
+        detail: `Synced ${universe.count} stocks and ${bhav.sessions} trading sessions (latest ${latestLabel}).`,
+      };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.store.complete('nse_sync', runDate, 'failed', message);
@@ -129,8 +165,9 @@ export class TradingSchedulerService implements OnModuleInit {
     try {
       // Prefer fresh universe/bhav before AI if possible (idempotent if sync already succeeded).
       try {
+        const bhavSessions = loadRankingConfig().bhavLookbackSessions;
         await this.nse.ensureUniverseSynced();
-        await this.nse.ensureBhavSynced(20);
+        await this.nse.ensureBhavSynced(bhavSessions);
       } catch (syncErr) {
         this.logger.warn(
           `recommend pre-sync soft-fail: ${syncErr instanceof Error ? syncErr.message : String(syncErr)}`,
@@ -253,4 +290,20 @@ export class TradingSchedulerService implements OnModuleInit {
       throw err;
     }
   }
+}
+
+function formatTradeDateLabel(value: string | Date | null | undefined): string {
+  if (value == null) return 'unknown';
+  if (value instanceof Date) {
+    return value.toISOString().slice(0, 10);
+  }
+  const raw = String(value);
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+    return raw.slice(0, 10);
+  }
+  const parsed = new Date(raw);
+  if (Number.isFinite(parsed.getTime())) {
+    return parsed.toISOString().slice(0, 10);
+  }
+  return raw;
 }

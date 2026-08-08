@@ -2,20 +2,25 @@
 
 import { useMarketOpen } from "@/hooks/useMarketOpen";
 import {
+  addBuyableToRecommendation,
   createRecommendation,
   executeTrades,
+  fetchExecutableRecommendation,
   fetchRecommendations,
+  markRecommendationExecutable,
   updateRecommendation,
 } from "@/lib/api";
 import { formatInr, formatPrice } from "@/lib/format";
+import { humanizeWatchReason } from "@/lib/humanize";
 import type {
   BuyableShortlistRow,
   PipelineFunnel,
   RecommendationHistoryRun,
   RecommendationItem,
   RecommendationRun,
+  RedShortlistRow,
   SetupRejectReason,
-  SetupRejectRow,
+  WatchShortlistRow,
 } from "@/lib/types";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
@@ -65,14 +70,25 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
   const [history, setHistory] = useState<RecommendationHistoryRun[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [addingSymbol, setAddingSymbol] = useState<string | null>(null);
+  const [markingId, setMarkingId] = useState<string | null>(null);
+  const [executableLoading, setExecutableLoading] = useState(false);
 
   const allocated = useMemo(
     () => items.reduce((sum, item) => sum + (Number(item.allocationInr) || 0), 0),
     [items],
   );
+  const buyListSymbols = useMemo(
+    () => new Set(items.map((i) => i.symbol.toUpperCase())),
+    [items],
+  );
+
+  const isExecutable =
+    (recommendation?.status ?? "").toUpperCase() === "EXECUTABLE";
 
   const canExecute =
     marketOpen &&
+    isExecutable &&
     Boolean(recommendation?.id) &&
     items.length > 0 &&
     !recommendLoading;
@@ -89,9 +105,30 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
     }
   }, [accessToken]);
 
+  const loadExecutable = useCallback(async () => {
+    setExecutableLoading(true);
+    try {
+      const run = await fetchExecutableRecommendation(accessToken);
+      if (run?.id) {
+        setRecommendation(run);
+        setItems(run.items.map((item) => ({ ...item })));
+        setDirty(false);
+      } else {
+        setRecommendation(null);
+        setItems([]);
+        setDirty(false);
+      }
+    } catch {
+      // Leave panel empty if executable fetch fails.
+    } finally {
+      setExecutableLoading(false);
+    }
+  }, [accessToken]);
+
   useEffect(() => {
     void loadHistory();
-  }, [loadHistory]);
+    void loadExecutable();
+  }, [loadHistory, loadExecutable]);
 
   async function onRecommend() {
     setError(null);
@@ -113,17 +150,34 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
     }
   }
 
+  async function onMarkExecutable(runId: string) {
+    setError(null);
+    setExecuteMessage(null);
+    setMarkingId(runId);
+    try {
+      const run = await markRecommendationExecutable(runId, accessToken);
+      setRecommendation(run);
+      setItems(run.items.map((item) => ({ ...item })));
+      setDirty(false);
+      setExecuteMessage("This plan is now the Executable plan — customize and execute below.");
+      await loadHistory();
+      // Scroll attention to the customize panel.
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Could not mark plan as Executable",
+      );
+    } finally {
+      setMarkingId(null);
+    }
+  }
+
   function patchItem(
     id: string,
-    field:
-      | "qty"
-      | "allocationInr"
-      | "buyLow"
-      | "buyHigh"
-      | "sellTarget"
-      | "stopLoss",
+    field: "qty" | "buyLow" | "buyHigh" | "sellTarget" | "stopLoss",
     raw: string,
-    syncFrom?: "qty" | "allocation",
   ) {
     setItems((prev) =>
       prev.map((item) => {
@@ -133,20 +187,16 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
           return item;
         }
         const next = { ...item };
-
-        if (syncFrom === "qty" && next.buyHigh > 0) {
+        if (field === "qty") {
           next.qty = Math.max(1, Math.floor(n));
-          next.allocationInr =
-            Math.round(next.qty * next.buyHigh * 100) / 100;
-        } else if (syncFrom === "allocation" && next.buyHigh > 0) {
-          next.allocationInr = Math.round(n * 100) / 100;
-          next.qty = Math.max(1, Math.floor(next.allocationInr / next.buyHigh));
-          next.allocationInr =
-            Math.round(next.qty * next.buyHigh * 100) / 100;
         } else {
-          next[field] = field === "qty" ? Math.max(1, Math.floor(n)) : n;
+          next[field] = n;
         }
-
+        // Allocation is always derived from qty × buy-high (worst-case fill).
+        if (next.buyHigh > 0) {
+          next.allocationInr =
+            Math.round(next.qty * next.buyHigh * 100) / 100;
+        }
         return next;
       }),
     );
@@ -160,11 +210,54 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
     setExecuteMessage(null);
   }
 
+  async function onAddBuyable(symbol: string) {
+    if (!recommendation?.id) return;
+    setError(null);
+    setExecuteMessage(null);
+    setAddingSymbol(symbol);
+    try {
+      // Persist removals/edits first so server totals stay consistent.
+      if (dirty) {
+        await persistEdits();
+      }
+      const saved = await addBuyableToRecommendation(
+        recommendation.id,
+        symbol,
+        accessToken,
+      );
+      setRecommendation((prev) =>
+        prev
+          ? {
+              ...prev,
+              ...saved,
+              // Keep screening lists from the original create response.
+              buyableShortlist: prev.buyableShortlist,
+              watchShortlist: prev.watchShortlist,
+              redShortlist: prev.redShortlist,
+              watchReasons: prev.watchReasons,
+              redReasons: prev.redReasons,
+              buyableCount: prev.buyableCount,
+              watchCount: prev.watchCount,
+              redCount: prev.redCount,
+              shortlistedCount: prev.shortlistedCount,
+              pipelineFunnel: prev.pipelineFunnel,
+              rejectedCandidates: prev.rejectedCandidates,
+            }
+          : saved,
+      );
+      setItems(saved.items.map((item) => ({ ...item })));
+      setDirty(false);
+      setExecuteMessage(`${symbol} added to the buy list.`);
+      await loadHistory();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Could not add ${symbol}`);
+    } finally {
+      setAddingSymbol(null);
+    }
+  }
+
   async function persistEdits(): Promise<RecommendationRun | null> {
     if (!recommendation?.id) return null;
-    if (items.length === 0) {
-      throw new Error("Keep at least one stock, or generate a new plan.");
-    }
     if (!dirty) return recommendation;
 
     const saved = await updateRecommendation(
@@ -202,6 +295,9 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
             ? ` · add-ons ${result.addOnSymbols.join(", ")}`
             : ""),
       );
+      setRecommendation((prev) =>
+        prev ? { ...prev, status: "EXECUTING" } : prev,
+      );
       await loadHistory();
       onExecuted?.();
     } catch (err) {
@@ -213,8 +309,8 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
 
   const executeTitle = !marketOpen
     ? "Execute is only available while the NSE market is open (09:15–15:30 IST)"
-    : !recommendation
-      ? "Run Get recommendations first"
+    : !recommendation || !isExecutable
+      ? "Mark a today's plan as Executable, or run Get recommendations"
       : items.length === 0
         ? "Plan has no picks to execute"
         : dirty
@@ -239,11 +335,11 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
       <section className="mx-auto max-w-3xl rounded-xl border border-teal-300/80 bg-gradient-to-b from-teal-50/90 via-white to-stone-50/60 p-5 shadow-sm sm:p-6">
         <div className="text-center">
           <h2 className="text-lg font-semibold text-stone-900">
-            Get recommendation
+            Executable recommendation
           </h2>
           <p className="mx-auto mt-1 max-w-xl text-sm text-stone-600">
-            Ask AI for today&apos;s buys, review or edit the plan, then execute
-            while the market is open.
+            Generate a plan, or mark one of today&apos;s pending plans as
+            Executable. Only the Executable plan can be customized and executed.
           </p>
         </div>
 
@@ -251,7 +347,9 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
           <button
             type="button"
             onClick={onRecommend}
-            disabled={recommendLoading || executeLoading}
+            disabled={
+              recommendLoading || executeLoading || markingId != null
+            }
             className="rounded-lg bg-teal-800 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-900 disabled:opacity-60"
           >
             {recommendLoading
@@ -293,10 +391,11 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
           </p>
         ) : null}
 
-        {recommendation ? (
+        {recommendation && isExecutable ? (
           <div className="mt-6 space-y-3">
               <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2.5">
                 <StatusBadge status={recommendation.status} />
+                <Badge tone="executable">Executable Plan</Badge>
                 <AiConfidencePair confidence={recommendation.confidence} />
                 {recommendation.marketRegime ? (
                   <LabelledBadge
@@ -320,14 +419,23 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
               itemCount={items.length}
               allocated={allocated}
               dirty={dirty}
+              buyListSymbols={buyListSymbols}
+              addingSymbol={addingSymbol}
+              onAddBuyable={onAddBuyable}
+              addDisabled={
+                executeLoading ||
+                recommendLoading ||
+                markingId != null ||
+                items.length >= 5
+              }
             />
 
             {items.length > 0 ? (
               <>
                 <p className="text-sm text-stone-600">
-                  Adjust quantity, amount, buy range, target, or stop below.
-                  Remove a stock you don&apos;t want. Your changes are applied
-                  when you click Execute trade.
+                  Adjust quantity, buy range, target, or stop. Allocation is
+                  calculated as qty × buy high. Remove a stock you don&apos;t
+                  want. Changes apply when you click Execute trade.
                   {dirty ? (
                     <span className="ml-1 font-medium text-amber-800">
                       You have unsaved edits.
@@ -336,12 +444,17 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
                 </p>
                 <EditablePlanTable
                   items={items}
-                  executeLoading={executeLoading}
+                  executeLoading={executeLoading || addingSymbol != null}
                   onPatch={patchItem}
                   onRemove={removeItem}
                 />
               </>
-            ) : null}
+            ) : (
+              <p className="text-sm text-stone-600">
+                No stocks on the buy list yet. Add any Buyable name below, or
+                generate a new plan.
+              </p>
+            )}
 
             {(recommendation.rejectedCandidates?.length ?? 0) > 0 &&
             items.length > 0 ? (
@@ -364,10 +477,20 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
               </details>
             ) : null}
           </div>
+        ) : recommendation && !isExecutable ? (
+          <p className="mt-5 text-center text-sm text-stone-600">
+            This plan is no longer customizable (status{" "}
+            {recommendation.status}). Mark another today&apos;s pending plan as
+            Executable, or generate a new one.
+          </p>
+        ) : executableLoading ? (
+          <p className="mt-5 text-center text-sm text-stone-500">
+            Loading Executable plan…
+          </p>
         ) : (
           <p className="mt-5 text-center text-sm text-stone-500">
-            Tap Get recommendations to ask AI for today&apos;s buys. You can
-            edit the list before Execute trade.
+            No Executable plan yet. Tap Get recommendations, or mark one of
+            today&apos;s pending plans below as Executable.
           </p>
         )}
       </section>
@@ -395,6 +518,9 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
                   (run.boughtLabel ?? "").toLowerCase() === "yes",
               );
               const pickCount = run.items.length;
+              const isExecutablePlan =
+                Boolean(run.isExecutablePlan) ||
+                run.status.toUpperCase() === "EXECUTABLE";
 
               return (
                 <li
@@ -432,6 +558,9 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
 
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-2.5">
                       <StatusBadge status={run.status} />
+                      {isExecutablePlan ? (
+                        <Badge tone="executable">Executable Plan</Badge>
+                      ) : null}
                       <AiConfidencePair confidence={run.confidence} />
                       <LabelledBadge
                         label="Bought"
@@ -479,10 +608,35 @@ export function RecommendationsPanel({ accessToken, onExecuted }: Props) {
                     ) : null}
                   </button>
 
+                  {run.canMarkExecutable ? (
+                    <div className="border-t border-stone-100 px-4 py-2.5 sm:px-5">
+                      <button
+                        type="button"
+                        onClick={() => void onMarkExecutable(run.id)}
+                        disabled={
+                          markingId != null ||
+                          recommendLoading ||
+                          executeLoading
+                        }
+                        className="rounded-lg bg-teal-800 px-3 py-2 text-xs font-semibold text-white transition hover:bg-teal-900 disabled:opacity-60"
+                      >
+                        {markingId === run.id
+                          ? "Marking…"
+                          : "Mark as Executable Plan"}
+                      </button>
+                      <p className="mt-1.5 text-[11px] text-stone-500">
+                        Makes this the only plan you can customize and execute.
+                      </p>
+                    </div>
+                  ) : null}
+
                   {open ? (
                     <div className="space-y-4 border-t border-stone-100 bg-gradient-to-b from-stone-50/80 to-white px-4 py-4 sm:px-5">
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-2.5">
                         <StatusBadge status={run.status} />
+                        {isExecutablePlan ? (
+                          <Badge tone="executable">Executable Plan</Badge>
+                        ) : null}
                         <AiConfidencePair confidence={run.confidence} />
                         <LabelledBadge
                           label="Bought"
@@ -672,13 +826,26 @@ function confidenceTone(
 
 function statusTone(
   status: string,
-): "pending" | "executing" | "completed" | "superseded" | "slate" {
+):
+  | "pending"
+  | "executable"
+  | "executing"
+  | "completed"
+  | "superseded"
+  | "slate" {
   const s = status.toUpperCase();
   if (s === "PENDING") return "pending";
+  if (s === "EXECUTABLE") return "executable";
   if (s === "EXECUTING") return "executing";
   if (s === "COMPLETED") return "completed";
   if (s === "SUPERSEDED") return "superseded";
   return "slate";
+}
+
+function statusLabel(status: string): string {
+  const s = status.toUpperCase();
+  if (s === "EXECUTABLE") return "EXECUTABLE";
+  return status;
 }
 
 function AiConfidencePair({
@@ -719,7 +886,7 @@ function LabelledBadge({
 function StatusBadge({ status }: { status: string }) {
   return (
     <span className="inline-flex shrink-0">
-      <Badge tone={statusTone(status)}>{status}</Badge>
+      <Badge tone={statusTone(status)}>{statusLabel(status)}</Badge>
     </span>
   );
 }
@@ -739,6 +906,7 @@ function Badge({
     | "yes"
     | "no"
     | "pending"
+    | "executable"
     | "executing"
     | "completed"
     | "superseded"
@@ -755,6 +923,7 @@ function Badge({
     yes: "bg-emerald-100 text-emerald-900 ring-emerald-300/70",
     no: "bg-stone-100 text-stone-600 ring-stone-200/80",
     pending: "bg-sky-50 text-sky-900 ring-sky-200/80",
+    executable: "bg-teal-100 text-teal-950 ring-teal-300/80",
     executing: "bg-violet-50 text-violet-900 ring-violet-200/80",
     completed: "bg-emerald-50 text-emerald-900 ring-emerald-200/80",
     superseded: "bg-stone-200/80 text-stone-600 ring-stone-300/70",
@@ -780,15 +949,8 @@ function EditablePlanTable({
   executeLoading: boolean;
   onPatch: (
     id: string,
-    field:
-      | "qty"
-      | "allocationInr"
-      | "buyLow"
-      | "buyHigh"
-      | "sellTarget"
-      | "stopLoss",
+    field: "qty" | "buyLow" | "buyHigh" | "sellTarget" | "stopLoss",
     raw: string,
-    syncFrom?: "qty" | "allocation",
   ) => void;
   onRemove: (id: string) => void;
 }) {
@@ -826,17 +988,16 @@ function EditablePlanTable({
                 <NumInput
                   value={item.qty}
                   step={1}
-                  onChange={(v) => onPatch(item.id, "qty", v, "qty")}
+                  onChange={(v) => onPatch(item.id, "qty", v)}
                 />
               </td>
-              <td className="px-3 py-2">
-                <NumInput
-                  value={item.allocationInr}
-                  step={100}
-                  onChange={(v) =>
-                    onPatch(item.id, "allocationInr", v, "allocation")
-                  }
-                />
+              <td className="px-3 py-2 tabular-nums text-stone-700">
+                <span className="block min-w-[6.5rem] px-2 py-1.5">
+                  {formatInr(item.allocationInr)}
+                </span>
+                <span className="block px-2 text-[10px] text-stone-400">
+                  qty × buy high
+                </span>
               </td>
               <td className="px-3 py-2">
                 <NumInput
@@ -870,7 +1031,7 @@ function EditablePlanTable({
                 <button
                   type="button"
                   onClick={() => onRemove(item.id)}
-                  disabled={executeLoading || items.length <= 1}
+                  disabled={executeLoading}
                   className="text-xs font-semibold text-rose-800 hover:text-rose-950 disabled:opacity-40"
                 >
                   Remove
@@ -889,11 +1050,19 @@ function RecommendationResultCard({
   itemCount,
   allocated,
   dirty,
+  buyListSymbols,
+  addingSymbol,
+  onAddBuyable,
+  addDisabled,
 }: {
   recommendation: RecommendationRun;
   itemCount: number;
   allocated: number;
   dirty: boolean;
+  buyListSymbols: Set<string>;
+  addingSymbol: string | null;
+  onAddBuyable: (symbol: string) => void;
+  addDisabled: boolean;
 }) {
   const cash = recommendation.availableCash;
   const leftover = Math.max(0, cash - allocated);
@@ -974,10 +1143,44 @@ function RecommendationResultCard({
           lowCash={lowCash}
           shortlistedCount={recommendation.shortlistedCount}
           buyableCount={recommendation.buyableCount}
+          watchCount={recommendation.watchCount}
+          redCount={recommendation.redCount}
           buyableBlockedReason={recommendation.buyableBlockedReason}
+          redShortlist={recommendation.redShortlist ?? []}
+          redReasons={recommendation.redReasons ?? []}
+        />
+      ) : null}
+
+      {(recommendation.buyableCount ??
+        recommendation.buyableShortlist?.length ??
+        0) > 0 ? (
+        <BuyableShortlistPanel
+          buyableCount={
+            recommendation.buyableCount ??
+            recommendation.buyableShortlist?.length ??
+            0
+          }
           buyableShortlist={recommendation.buyableShortlist ?? []}
-          setupRejectReasons={recommendation.setupRejectReasons ?? []}
-          setupRejects={recommendation.setupRejects ?? []}
+          buyableBlockedReason={recommendation.buyableBlockedReason}
+          lowCash={lowCash}
+          buyListSymbols={buyListSymbols}
+          addingSymbol={addingSymbol}
+          onAddBuyable={onAddBuyable}
+          addDisabled={addDisabled}
+        />
+      ) : null}
+
+      {(recommendation.watchCount ??
+        recommendation.watchShortlist?.length ??
+        0) > 0 ? (
+        <WatchShortlistPanel
+          watchCount={
+            recommendation.watchCount ??
+            recommendation.watchShortlist?.length ??
+            0
+          }
+          watchShortlist={recommendation.watchShortlist ?? []}
+          watchReasons={recommendation.watchReasons ?? []}
         />
       ) : null}
     </div>
@@ -1012,31 +1215,34 @@ function ScreeningSummary({
   lowCash,
   shortlistedCount,
   buyableCount,
+  watchCount,
+  redCount,
   buyableBlockedReason,
-  buyableShortlist,
-  setupRejectReasons,
-  setupRejects,
+  redShortlist,
+  redReasons,
 }: {
   funnel: PipelineFunnel;
   hasPicks: boolean;
   lowCash: boolean;
   shortlistedCount?: number;
   buyableCount?: number;
+  watchCount?: number;
+  redCount?: number;
   buyableBlockedReason?: "LOW_CASH" | "NO_BUYABLE_SETUPS" | null;
-  buyableShortlist: BuyableShortlistRow[];
-  setupRejectReasons: SetupRejectReason[];
-  setupRejects: SetupRejectRow[];
+  redShortlist: RedShortlistRow[];
+  redReasons: SetupRejectReason[];
 }) {
-  const shortlisted =
-    shortlistedCount ?? funnel.prioritized ?? setupRejects.length;
-  const buyable = buyableCount ?? funnel.featureReady ?? buyableShortlist.length;
-  const rejected = setupRejects.length;
+  const shortlisted = shortlistedCount ?? funnel.prioritized ?? 0;
+  const buyable = buyableCount ?? funnel.featureReady ?? 0;
+  const watch = watchCount ?? 0;
+  const red = redCount ?? redShortlist.length;
   const conclusion = screeningConclusion({
     funnel,
     hasPicks,
     lowCash,
     shortlisted,
     buyable,
+    watch,
     buyableBlockedReason,
   });
 
@@ -1046,6 +1252,10 @@ function ScreeningSummary({
         How we screened the market
       </summary>
       <p className="mt-2 text-stone-700">{conclusion}</p>
+      <p className="mt-1 text-xs text-stone-500">
+        Strong stock ≠ automatically buyable. Only Buyable names can go on the
+        buy list.
+      </p>
 
       <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-stone-700">
         <li>
@@ -1053,102 +1263,34 @@ function ScreeningSummary({
           {(funnel.liquidEligible ?? funnel.quotesOk).toLocaleString("en-IN")}
         </li>
         <li>
-          Research / priority shortlist for deep research:{" "}
-          {shortlisted.toLocaleString("en-IN")}
+          Research Top shortlist: {shortlisted.toLocaleString("en-IN")}
         </li>
         <li>
-          Passed entry/stop/target filter (buyable):{" "}
-          {buyable.toLocaleString("en-IN")}
-          {rejected > 0
-            ? ` · ${rejected.toLocaleString("en-IN")} failed that filter`
-            : ""}
+          Trade-plan status — Buyable {buyable.toLocaleString("en-IN")} · Watch{" "}
+          {watch.toLocaleString("en-IN")} · Red {red.toLocaleString("en-IN")}
         </li>
         <li>
-          AI pick among buyable:{" "}
+          AI pick among Buyable only:{" "}
           {lowCash || buyableBlockedReason === "LOW_CASH"
             ? "skipped (not enough free cash)"
             : hasPicks
               ? `${funnel.validatorAccepted ?? itemsFallback(funnel)} kept for you`
               : buyable === 0
-                ? "nothing buyable to send"
-                : "no picks kept"}
+                ? "nothing buyable today"
+                : "no picks kept (zero-trade day is valid)"}
         </li>
       </ol>
-      <p className="mt-2 text-xs text-stone-500">
-        Mid/small priced stocks (e.g. ₹20–80) are allowed. Only names below the
-        configured price floor (default ₹10) are cut as too cheap.
-      </p>
 
-      {buyable > 0 ? (
-        <div className="mt-3 rounded-md border border-teal-200 bg-teal-50/80 px-3 py-2">
-          <p className="font-medium text-teal-950">
-            Buyable after setup filter ({buyable.toLocaleString("en-IN")})
-          </p>
-          <p className="mt-1 text-xs text-teal-900/80">
-            {buyableBlockedReason === "LOW_CASH" || lowCash
-              ? "These already had a valid plan, but AI was not asked because free cash is below the minimum for new buys."
-              : "These cleared entry/stop/target and were available for AI to choose from."}
-          </p>
-          {buyableShortlist.length > 0 ? (
-            <details className="mt-2">
-              <summary className="cursor-pointer text-xs font-medium text-teal-950">
-                Show buyable list ({buyableShortlist.length})
-              </summary>
-              <div className="mt-2 max-h-64 overflow-auto rounded border border-teal-200 bg-white">
-                <table className="min-w-full text-left text-xs">
-                  <thead className="sticky top-0 bg-teal-50 text-teal-900/70">
-                    <tr>
-                      <th className="px-2 py-1.5 font-medium">Symbol</th>
-                      <th className="px-2 py-1.5 font-medium">Buy band</th>
-                      <th className="px-2 py-1.5 font-medium">Target</th>
-                      <th className="px-2 py-1.5 font-medium">Stop</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {buyableShortlist.map((row) => (
-                      <tr
-                        key={row.symbol}
-                        className="border-t border-stone-100"
-                      >
-                        <td className="px-2 py-1 font-medium text-stone-900">
-                          {row.symbol}
-                        </td>
-                        <td className="px-2 py-1 tabular-nums text-stone-600">
-                          {row.buyLow != null && row.buyHigh != null
-                            ? `${formatPrice(row.buyLow)}–${formatPrice(row.buyHigh)}`
-                            : "—"}
-                        </td>
-                        <td className="px-2 py-1 tabular-nums text-stone-600">
-                          {row.sellTarget != null
-                            ? formatPrice(row.sellTarget)
-                            : "—"}
-                        </td>
-                        <td className="px-2 py-1 tabular-nums text-stone-600">
-                          {row.stopLoss != null
-                            ? formatPrice(row.stopLoss)
-                            : "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-          ) : null}
-        </div>
-      ) : null}
-
-      {rejected > 0 ? (
-        <div className="mt-3 rounded-md border border-stone-200 bg-white px-3 py-2">
-          <p className="font-medium text-stone-800">
-            Failed setup filter ({rejected.toLocaleString("en-IN")} of{" "}
-            {shortlisted.toLocaleString("en-IN")})
-          </p>
-          {setupRejectReasons.length > 0 ? (
+      {red > 0 ? (
+        <details className="mt-3 rounded-md border border-stone-200 bg-white px-3 py-2">
+          <summary className="cursor-pointer font-medium text-stone-800">
+            Could not evaluate ({red.toLocaleString("en-IN")}) — technical
+          </summary>
+          {redReasons.length > 0 ? (
             <ul className="mt-2 space-y-1 text-xs text-stone-700">
-              {setupRejectReasons.map((row) => (
+              {redReasons.map((row) => (
                 <li key={row.reason} className="flex justify-between gap-3">
-                  <span>{row.reason}</span>
+                  <span>{humanizeWatchReason(row.reason, row.reason)}</span>
                   <span className="shrink-0 tabular-nums text-stone-500">
                     {row.count}
                   </span>
@@ -1156,21 +1298,17 @@ function ScreeningSummary({
               ))}
             </ul>
           ) : null}
-
-          <details className="mt-3">
-            <summary className="cursor-pointer text-xs font-medium text-stone-800">
-              Full reject list ({setupRejects.length} stocks)
-            </summary>
-            <div className="mt-2 max-h-64 overflow-auto rounded border border-stone-200">
+          {redShortlist.length > 0 ? (
+            <div className="mt-2 max-h-48 overflow-auto rounded border border-stone-200">
               <table className="min-w-full text-left text-xs">
                 <thead className="sticky top-0 bg-stone-100 text-stone-500">
                   <tr>
                     <th className="px-2 py-1.5 font-medium">Symbol</th>
-                    <th className="px-2 py-1.5 font-medium">Why not buyable</th>
+                    <th className="px-2 py-1.5 font-medium">Reason</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {setupRejects.map((row) => (
+                  {redShortlist.map((row) => (
                     <tr
                       key={`${row.symbol}-${row.reason}`}
                       className="border-t border-stone-100"
@@ -1178,13 +1316,181 @@ function ScreeningSummary({
                       <td className="px-2 py-1 font-medium text-stone-900">
                         {row.symbol}
                       </td>
-                      <td className="px-2 py-1 text-stone-600">{row.reason}</td>
+                      <td className="px-2 py-1 text-stone-600">
+                        {humanizeWatchReason(row.reasonCode, row.reason)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          </details>
+          ) : null}
+        </details>
+      ) : null}
+    </details>
+  );
+}
+
+function BuyableShortlistPanel({
+  buyableCount,
+  buyableShortlist,
+  buyableBlockedReason,
+  lowCash,
+  buyListSymbols,
+  addingSymbol,
+  onAddBuyable,
+  addDisabled,
+}: {
+  buyableCount: number;
+  buyableShortlist: BuyableShortlistRow[];
+  buyableBlockedReason?: "LOW_CASH" | "NO_BUYABLE_SETUPS" | null;
+  lowCash: boolean;
+  buyListSymbols: Set<string>;
+  addingSymbol: string | null;
+  onAddBuyable: (symbol: string) => void;
+  addDisabled: boolean;
+}) {
+  return (
+    <details className="mt-3 rounded-lg border border-teal-200 bg-teal-50/80 px-3 py-2 text-sm">
+      <summary className="cursor-pointer font-medium text-teal-950">
+        Buyable ({buyableCount.toLocaleString("en-IN")})
+      </summary>
+      <p className="mt-2 text-xs text-teal-900/80">
+        {buyableBlockedReason === "LOW_CASH" || lowCash
+          ? "Defensible trade plans exist, but AI was not asked because free cash is below the minimum for new buys."
+          : "Tradable now with a structural plan. AI may pick some; you can also Add to list."}
+      </p>
+      {buyableShortlist.length > 0 ? (
+        <div className="mt-2 max-h-72 overflow-auto rounded border border-teal-200 bg-white">
+          <table className="min-w-full text-left text-xs">
+            <thead className="sticky top-0 bg-teal-50 text-teal-900/70">
+              <tr>
+                <th className="px-2 py-1.5 font-medium">Symbol</th>
+                <th className="px-2 py-1.5 font-medium">Buy band</th>
+                <th className="px-2 py-1.5 font-medium">Target</th>
+                <th className="px-2 py-1.5 font-medium">Stop</th>
+                <th className="px-2 py-1.5 font-medium">R:R</th>
+                <th className="px-2 py-1.5 font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              {buyableShortlist.map((row) => {
+                const onList = buyListSymbols.has(row.symbol.toUpperCase());
+                const busy = addingSymbol === row.symbol;
+                const canAdd =
+                  !onList &&
+                  !addDisabled &&
+                  row.buyLow != null &&
+                  row.buyHigh != null &&
+                  row.sellTarget != null &&
+                  row.stopLoss != null;
+                return (
+                  <tr key={row.symbol} className="border-t border-stone-100">
+                    <td className="px-2 py-1 font-medium text-stone-900">
+                      {row.symbol}
+                    </td>
+                    <td className="px-2 py-1 tabular-nums text-stone-600">
+                      {row.buyLow != null && row.buyHigh != null
+                        ? `${formatPrice(row.buyLow)}–${formatPrice(row.buyHigh)}`
+                        : "—"}
+                    </td>
+                    <td className="px-2 py-1 tabular-nums text-stone-600">
+                      {row.sellTarget != null
+                        ? formatPrice(row.sellTarget)
+                        : "—"}
+                    </td>
+                    <td className="px-2 py-1 tabular-nums text-stone-600">
+                      {row.stopLoss != null ? formatPrice(row.stopLoss) : "—"}
+                    </td>
+                    <td className="px-2 py-1 tabular-nums text-stone-600">
+                      {row.riskReward != null
+                        ? row.riskReward.toFixed(2)
+                        : "—"}
+                    </td>
+                    <td className="px-2 py-1 text-right">
+                      {onList ? (
+                        <span className="text-[11px] font-medium text-teal-800">
+                          On list
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={!canAdd || busy}
+                          onClick={() => onAddBuyable(row.symbol)}
+                          className="rounded-md bg-teal-800 px-2 py-1 text-[11px] font-semibold text-white hover:bg-teal-900 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {busy ? "Adding…" : "Add to list"}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </details>
+  );
+}
+
+function WatchShortlistPanel({
+  watchCount,
+  watchShortlist,
+  watchReasons,
+}: {
+  watchCount: number;
+  watchShortlist: WatchShortlistRow[];
+  watchReasons: SetupRejectReason[];
+}) {
+  return (
+    <details className="mt-3 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-sm">
+      <summary className="cursor-pointer font-medium text-amber-950">
+        Watch ({watchCount.toLocaleString("en-IN")}) — info only, not buys
+      </summary>
+      <p className="mt-2 text-xs text-amber-900/80">
+        These made the research Top list but are not attractive to buy at
+        today&apos;s price (for example extended, stop too wide, or target too
+        close). Shown so you can see why they were skipped — there is no buy
+        action here on purpose.
+      </p>
+      {watchReasons.length > 0 ? (
+        <ul className="mt-2 space-y-1 text-xs text-amber-950/90">
+          {watchReasons.map((row) => (
+            <li key={row.reason} className="flex justify-between gap-3">
+              <span>{humanizeWatchReason(row.reason, row.reason)}</span>
+              <span className="shrink-0 tabular-nums text-amber-800/70">
+                {row.count}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {watchShortlist.length > 0 ? (
+        <div className="mt-2 max-h-64 overflow-auto rounded border border-amber-200 bg-white">
+          <table className="min-w-full text-left text-xs">
+            <thead className="sticky top-0 bg-amber-50 text-amber-900/70">
+              <tr>
+                <th className="px-2 py-1.5 font-medium">Symbol</th>
+                <th className="px-2 py-1.5 font-medium">Why watch</th>
+              </tr>
+            </thead>
+            <tbody>
+              {watchShortlist.map((row) => (
+                <tr
+                  key={`${row.symbol}-${row.reason}`}
+                  className="border-t border-stone-100"
+                >
+                  <td className="px-2 py-1 font-medium text-stone-900">
+                    {row.symbol}
+                  </td>
+                  <td className="px-2 py-1 text-stone-600">
+                    {humanizeWatchReason(row.reasonCode, row.reason)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       ) : null}
     </details>
@@ -1201,21 +1507,29 @@ function screeningConclusion(input: {
   lowCash: boolean;
   shortlisted: number;
   buyable: number;
+  watch: number;
   buyableBlockedReason?: "LOW_CASH" | "NO_BUYABLE_SETUPS" | null;
 }): string {
-  const { funnel, hasPicks, lowCash, shortlisted, buyable, buyableBlockedReason } =
-    input;
+  const {
+    funnel,
+    hasPicks,
+    lowCash,
+    shortlisted,
+    buyable,
+    watch,
+    buyableBlockedReason,
+  } = input;
   if (hasPicks) {
     const kept = funnel.validatorAccepted ?? funnel.aiPicksProposed;
     return kept != null
-      ? `Pipeline: shortlist ${shortlisted} → buyable ${buyable} → kept ${kept} for you.`
-      : `Pipeline: shortlist ${shortlisted} → buyable ${buyable} → picks shown below.`;
+      ? `Top ${shortlisted} → Buyable ${buyable} (Watch ${watch}) → kept ${kept}.`
+      : `Top ${shortlisted} → Buyable ${buyable} → picks shown below.`;
   }
   if (buyable > 0 && (lowCash || buyableBlockedReason === "LOW_CASH")) {
-    return `Pipeline worked as intended: shortlist ${shortlisted} → ${buyable} had valid entry/stop/target → AI skipped because free cash is too low for new buys.`;
+    return `Top ${shortlisted} → ${buyable} Buyable → AI skipped (free cash too low).`;
   }
   if (buyable === 0) {
-    return `Shortlist ${shortlisted} was checked for entry/stop/target; none were buyable today, so there was nothing for AI to choose from.`;
+    return `Top ${shortlisted} had structural plans calculated; none were Buyable today (${watch} Watch). Zero-trade day is valid.`;
   }
   if ((funnel.aiPicksProposed ?? 0) === 0) {
     return `Buyable set was ${buyable}, but AI chose to sit out.`;
@@ -1249,14 +1563,14 @@ function explainEmptyPlan(
   const funnel = recommendation.pipelineFunnel;
   if (funnel && funnel.featureReady === 0) {
     return {
-      title: "No clean setups found",
-      body: "Shortlisted stocks failed chart setup rules (entry, stop, or target). That is not because of your cash balance.",
+      title: "No buyable trade plans today",
+      body: "The Top shortlist was reviewed, but none had a defensible structural entry/stop/target to buy now. Watch names are not buy signals. Sitting in cash is intentional.",
     };
   }
 
   return {
     title: "Sitting in cash",
-    body: "No new stocks were suggested. Low conviction or no valid setups — staying in cash is intentional.",
+    body: "No new stocks were suggested. AI may sit out even when Buyable names exist — zero-trade days are valid.",
   };
 }
 

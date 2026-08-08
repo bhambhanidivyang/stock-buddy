@@ -34,9 +34,10 @@ describe('normalizePicks', () => {
       targetReason: 'test',
       risk,
       reward,
+      planQuality: 'GREEN',
       validationStatus: 'VALID',
       rejectionCode: null,
-      rejectionDetail: { setupType: 'PULLBACK_EMA20' },
+      rejectionDetail: { setupType: 'PULLBACK_EMA20', planQuality: 'GREEN' },
     };
   }
 

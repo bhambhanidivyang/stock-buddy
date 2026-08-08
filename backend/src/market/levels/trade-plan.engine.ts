@@ -3,9 +3,15 @@ import { round } from '../indicators';
 import { buildEntryBand } from './entry.engine';
 import type { LevelsConfig } from './levels.config';
 import { loadLevelsConfig } from './levels.config';
+import {
+  isBuyablePlanQuality,
+  worsePlanQuality,
+  type PlanQuality,
+} from './plan-quality';
 import { detectSetup } from './setup.engine';
 import { buildStop } from './stop.engine';
-import { buildStructureLevels } from './structure';
+import { resolveStructureSetup } from './structure-entry';
+import { buildStructureLevels, nearestSupportBelow } from './structure';
 import { buildTarget } from './target.engine';
 import type { RejectionDetail, SuggestedLevels, TradePlan } from './types';
 
@@ -43,15 +49,22 @@ function rejected(
     riskReward: partial.riskReward ?? 0,
     atrUsed: partial.atrUsed,
     method: 'STRUCTURE_ATR_V1',
+    planQuality: 'RED',
     validationStatus: 'REJECTED',
     rejectionCode: partial.rejectionCode,
-    rejectionDetail: partial.rejectionDetail,
+    rejectionDetail: {
+      ...partial.rejectionDetail,
+      planQuality: 'RED',
+    },
     breakLevel: partial.breakLevel ?? null,
   };
 }
 
 /**
  * Structure + ATR trade plan. RR always at buyHigh. Never invents geometry to pass.
+ * Named setups are optional; STRUCTURE fallback uses swing/PDH/EMA20 anchors.
+ * GREEN/AMBER → VALID (BUYABLE). Soft RR ≥1R still VALID (quality info).
+ * Hard reject → REJECTED (classified WATCH/RED upstream).
  */
 export function buildTradePlan(input: TradePlanInput): TradePlan {
   const config = input.config ?? loadLevelsConfig();
@@ -82,7 +95,7 @@ export function buildTradePlan(input: TradePlanInput): TradePlan {
     minTouches: config.minTouches,
   });
 
-  const setup = detectSetup({
+  let setup = detectSetup({
     bars: input.bars,
     ltp: input.ltp,
     atr,
@@ -94,17 +107,33 @@ export function buildTradePlan(input: TradePlanInput): TradePlan {
     config,
   });
 
+  // Named setups are optional descriptions. If none fire, still try an
+  // objective structure-anchored plan (swing support / PDH / EMA20).
   if (setup.setupType === 'NONE') {
-    return rejected({
-      setupType: 'NONE',
-      atrUsed: round(atr, 4),
-      rejectionCode: 'NO_SETUP',
-      rejectionDetail: {
-        setupType: 'NONE',
-        message: setup.reason,
-        atrUsed: round(atr, 4),
-      },
+    const structural = resolveStructureSetup({
+      ltp: input.ltp,
+      atr,
+      ema20: input.ema20,
+      ema50: input.ema50,
+      prevDayHigh: input.prevDayHigh,
+      supports,
+      bars: input.bars,
+      config,
     });
+    if (structural) {
+      setup = structural;
+    } else {
+      return rejected({
+        setupType: 'NONE',
+        atrUsed: round(atr, 4),
+        rejectionCode: 'NO_SETUP',
+        rejectionDetail: {
+          setupType: 'NONE',
+          message: setup.reason,
+          atrUsed: round(atr, 4),
+        },
+      });
+    }
   }
 
   const entry = buildEntryBand({
@@ -132,6 +161,7 @@ export function buildTradePlan(input: TradePlanInput): TradePlan {
         message: entry.message,
         buyHigh: entry.buyHigh,
         atrUsed: round(atr, 4),
+        entryOvershootAtr: entry.overshootAtr,
       },
     });
   }
@@ -162,8 +192,22 @@ export function buildTradePlan(input: TradePlanInput): TradePlan {
         stopLoss: stop.stopLoss,
         stopStructurePrice: stop.structurePrice,
         atrUsed: round(atr, 4),
+        entryOvershootAtr: entry.overshootAtr,
+        riskPct: stop.riskPct,
+        riskAtr: stop.riskAtr,
       },
     });
+  }
+
+  // Fill measured-move height from nearest support under the reference level
+  // when the setup did not already supply rangeHeight.
+  let rangeHeight = setup.rangeHeight;
+  const refLevel = setup.breakLevel ?? entry.buyHigh;
+  if ((rangeHeight == null || !(rangeHeight > 0)) && refLevel != null) {
+    const base = nearestSupportBelow(supports, refLevel);
+    if (base != null && refLevel > base.levelPrice) {
+      rangeHeight = refLevel - base.levelPrice;
+    }
   }
 
   const target = buildTarget({
@@ -172,8 +216,8 @@ export function buildTradePlan(input: TradePlanInput): TradePlan {
     stopLoss: stop.stopLoss,
     atr,
     resistances,
-    breakLevel: setup.breakLevel,
-    rangeHeight: setup.rangeHeight,
+    breakLevel: setup.breakLevel ?? entry.buyHigh,
+    rangeHeight,
     config,
   });
 
@@ -198,13 +242,37 @@ export function buildTradePlan(input: TradePlanInput): TradePlan {
         stopLoss: stop.stopLoss,
         stopStructurePrice: stop.structurePrice,
         rr: target.rr,
-        requiredRr: config.minTargetRr,
+        requiredRr: config.minTargetRrAmber,
         risk: target.risk,
         reward: target.reward,
         targetsEvaluated: target.targetsEvaluated,
         atrUsed: round(atr, 4),
+        entryOvershootAtr: entry.overshootAtr,
+        riskPct: stop.riskPct,
+        riskAtr: stop.riskAtr,
       },
     });
+  }
+
+  const planQuality = worsePlanQuality(
+    worsePlanQuality(entry.quality, stop.quality),
+    target.quality,
+  );
+  const amberReasons: string[] = [];
+  if (entry.quality === 'AMBER') {
+    amberReasons.push(
+      `entry overshoot ${entry.overshootAtr.toFixed(2)}ATR (chase green≤${config.entryChaseAtr})`,
+    );
+  }
+  if (stop.quality === 'AMBER') {
+    amberReasons.push(
+      `stop riskPct ${stop.riskPct.toFixed(3)} (greenCap ${stop.greenPctCap.toFixed(3)}, amberCap ${stop.amberPctCap.toFixed(3)})`,
+    );
+  }
+  if (target.quality === 'AMBER') {
+    amberReasons.push(
+      `RR ${target.riskReward} < green ${config.minTargetRr} (amber≥${config.minTargetRrAmber})`,
+    );
   }
 
   return {
@@ -221,6 +289,7 @@ export function buildTradePlan(input: TradePlanInput): TradePlan {
     riskReward: target.riskReward,
     atrUsed: round(atr, 4),
     method: 'STRUCTURE_ATR_V1',
+    planQuality,
     validationStatus: 'VALID',
     rejectionCode: null,
     rejectionDetail: {
@@ -234,15 +303,24 @@ export function buildTradePlan(input: TradePlanInput): TradePlan {
       targetsEvaluated: target.targetsEvaluated,
       stopStructurePrice: stop.structurePrice,
       atrUsed: round(atr, 4),
+      entryOvershootAtr: entry.overshootAtr,
+      riskPct: stop.riskPct,
+      riskAtr: stop.riskAtr,
+      planQuality,
+      amberReasons: amberReasons.length > 0 ? amberReasons : undefined,
     },
     breakLevel: setup.breakLevel,
   };
 }
 
 export function toSuggestedLevels(plan: TradePlan): SuggestedLevels | null {
-  if (plan.validationStatus !== 'VALID') {
+  if (
+    plan.validationStatus !== 'VALID' ||
+    !isBuyablePlanQuality(plan.planQuality)
+  ) {
     return null;
   }
+  const quality = plan.planQuality as 'GREEN' | 'AMBER';
   return {
     buyLow: plan.buyLow,
     buyHigh: plan.buyHigh,
@@ -257,8 +335,11 @@ export function toSuggestedLevels(plan: TradePlan): SuggestedLevels | null {
     targetReason: plan.targetReason,
     risk: plan.risk,
     reward: plan.reward,
+    planQuality: quality,
     validationStatus: 'VALID',
     rejectionCode: null,
     rejectionDetail: plan.rejectionDetail,
   };
 }
+
+export type { PlanQuality };

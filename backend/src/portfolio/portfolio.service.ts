@@ -21,6 +21,11 @@ import {
   ReviewTradeDto,
 } from './dtos/review-trade.dto';
 
+const MANAGEABLE: TradeStatus[] = [
+  TradeStatus.OPEN,
+  TradeStatus.NEEDS_REVIEW,
+];
+
 @Injectable()
 export class PortfolioService {
   constructor(
@@ -105,9 +110,10 @@ export class PortfolioService {
   }
 
   /**
-   * Human decision on a parked NEEDS_REVIEW lot:
-   * - SELL: paper sell at live Yahoo mark (NSE regular session only)
-   * - RESUME: return to OPEN so the execution loop manages target/stop again
+   * Human manage on OPEN / NEEDS_REVIEW lots:
+   * - MODIFY: update sellTarget + stopLoss
+   * - SELL: paper sell full or partial qty at live Yahoo mark (NSE hours)
+   * - RESUME: NEEDS_REVIEW → OPEN (optional retarget)
    */
   async reviewTrade(userId: string, tradeId: string, dto: ReviewTradeDto) {
     const account = await this.accounts.getAccountForUser(userId);
@@ -117,34 +123,65 @@ export class PortfolioService {
     if (!trade) {
       throw new NotFoundException(`Trade ${tradeId} not found`);
     }
-    if (trade.status !== TradeStatus.NEEDS_REVIEW) {
+    if (!MANAGEABLE.includes(trade.status)) {
       throw new BadRequestException(
-        `Trade ${trade.symbol} is ${trade.status}, only NEEDS_REVIEW can be reviewed`,
+        `Trade ${trade.symbol} is ${trade.status}; only OPEN or NEEDS_REVIEW can be managed`,
       );
     }
 
     if (dto.action === ReviewTradeAction.RESUME) {
+      if (trade.status !== TradeStatus.NEEDS_REVIEW) {
+        throw new BadRequestException(
+          `RESUME only applies to NEEDS_REVIEW lots (got ${trade.status})`,
+        );
+      }
       return this.resumeTrade(trade, dto);
     }
-    return this.sellReviewedTrade(trade, dto);
+
+    if (dto.action === ReviewTradeAction.MODIFY) {
+      return this.modifyTrade(trade, dto);
+    }
+
+    return this.sellTrade(trade, dto);
   }
 
-  private applyRetarget(trade: Trade, dto: ReviewTradeDto) {
+  private applyRetarget(trade: Trade, dto: ReviewTradeDto, required: boolean) {
     if (dto.sellTarget != null && dto.stopLoss != null) {
       if (dto.sellTarget <= dto.stopLoss) {
         throw new BadRequestException('sellTarget must be above stopLoss');
       }
       trade.sellTarget = priceString(dto.sellTarget);
       trade.stopLoss = priceString(dto.stopLoss);
-    } else if (dto.sellTarget != null || dto.stopLoss != null) {
+      return;
+    }
+    if (required) {
+      throw new BadRequestException(
+        'MODIFY requires both sellTarget and stopLoss',
+      );
+    }
+    if (dto.sellTarget != null || dto.stopLoss != null) {
       throw new BadRequestException(
         'Provide both sellTarget and stopLoss to retarget, or neither',
       );
     }
   }
 
+  private async modifyTrade(trade: Trade, dto: ReviewTradeDto) {
+    this.applyRetarget(trade, dto, true);
+    await this.trades.save(trade);
+    return {
+      tradeId: trade.id,
+      symbol: trade.symbol,
+      action: ReviewTradeAction.MODIFY,
+      status: trade.status,
+      qty: trade.qty,
+      sellTarget: toNumber(trade.sellTarget),
+      stopLoss: toNumber(trade.stopLoss),
+    };
+  }
+
   private async resumeTrade(trade: Trade, dto: ReviewTradeDto) {
-    this.applyRetarget(trade, dto);
+    this.applyRetarget(trade, dto, false);
 
     trade.status = TradeStatus.OPEN;
     await this.trades.save(trade);
@@ -154,18 +191,25 @@ export class PortfolioService {
       symbol: trade.symbol,
       action: ReviewTradeAction.RESUME,
       status: trade.status,
+      qty: trade.qty,
       sellTarget: toNumber(trade.sellTarget),
       stopLoss: toNumber(trade.stopLoss),
     };
   }
 
-  private async sellReviewedTrade(trade: Trade, dto: ReviewTradeDto) {
-    // Validate retarget early (before quote / market checks).
-    this.applyRetarget(trade, dto);
+  private async sellTrade(trade: Trade, dto: ReviewTradeDto) {
+    this.applyRetarget(trade, dto, false);
 
     if (!isMarketOpenForTrading()) {
       throw new BadRequestException(
         'Paper sell requires NSE regular session (09:15–15:30 IST)',
+      );
+    }
+
+    const sellQty = dto.qty ?? trade.qty;
+    if (!Number.isInteger(sellQty) || sellQty < 1 || sellQty > trade.qty) {
+      throw new BadRequestException(
+        `qty must be an integer between 1 and ${trade.qty}`,
       );
     }
 
@@ -182,11 +226,18 @@ export class PortfolioService {
         where: { id: trade.id },
         lock: { mode: 'pessimistic_write' },
       });
-      if (!locked || locked.status !== TradeStatus.NEEDS_REVIEW) {
-        throw new BadRequestException('Trade is no longer NEEDS_REVIEW');
+      if (!locked || !MANAGEABLE.includes(locked.status)) {
+        throw new BadRequestException(
+          'Trade is no longer OPEN or NEEDS_REVIEW',
+        );
+      }
+      if (sellQty > locked.qty) {
+        throw new BadRequestException(
+          `qty ${sellQty} exceeds current lot size ${locked.qty}`,
+        );
       }
 
-      this.applyRetarget(locked, dto);
+      this.applyRetarget(locked, dto, false);
 
       const account = await manager.findOne(Account, {
         where: { id: locked.accountId },
@@ -196,32 +247,83 @@ export class PortfolioService {
         throw new NotFoundException('Account not found');
       }
 
-      const proceeds = roundMoney(mark * locked.qty);
-      const invested = toNumber(locked.investedInr ?? '0');
-      const pnl = roundMoney(proceeds - invested);
+      const investedTotal = toNumber(
+        locked.investedInr ?? moneyFallback(toNumber(locked.buyPrice ?? '0'), locked.qty),
+      );
+      const investedSold = roundMoney((investedTotal * sellQty) / locked.qty);
+      const proceeds = roundMoney(mark * sellQty);
+      const pnl = roundMoney(proceeds - investedSold);
 
       account.cash = moneyString(toNumber(account.cash) + proceeds);
       account.realizedPnl = moneyString(toNumber(account.realizedPnl) + pnl);
 
-      locked.status = TradeStatus.CLOSED;
-      locked.exitReason = TradeExitReason.HUMAN_SELL;
-      locked.sellPrice = priceString(mark);
-      locked.sellAt = new Date();
-      locked.proceedsInr = moneyString(proceeds);
-      locked.realizedPnl = moneyString(pnl);
+      const remainingQty = locked.qty - sellQty;
+      let remainingTradeId: string | null = null;
+      let closedTradeId: string;
 
-      await manager.save(account);
-      await manager.save(locked);
+      if (remainingQty === 0) {
+        locked.status = TradeStatus.CLOSED;
+        locked.exitReason = TradeExitReason.HUMAN_SELL;
+        locked.sellPrice = priceString(mark);
+        locked.sellAt = new Date();
+        locked.proceedsInr = moneyString(proceeds);
+        locked.realizedPnl = moneyString(pnl);
+        locked.investedInr = moneyString(investedSold);
+        await manager.save(account);
+        await manager.save(locked);
+        closedTradeId = locked.id;
+      } else {
+        // Closed sibling for the sold slice (statements / history).
+        const closed = manager.create(Trade, {
+          accountId: locked.accountId,
+          recommendationItemId: locked.recommendationItemId,
+          executionSessionId: locked.executionSessionId,
+          symbol: locked.symbol,
+          qty: sellQty,
+          role: locked.role,
+          buyLow: locked.buyLow,
+          buyHigh: locked.buyHigh,
+          sellTarget: locked.sellTarget,
+          stopLoss: locked.stopLoss,
+          summary: locked.summary,
+          status: TradeStatus.CLOSED,
+          exitReason: TradeExitReason.HUMAN_SELL,
+          buyPrice: locked.buyPrice,
+          buyAt: locked.buyAt,
+          sellPrice: priceString(mark),
+          sellAt: new Date(),
+          investedInr: moneyString(investedSold),
+          proceedsInr: moneyString(proceeds),
+          realizedPnl: moneyString(pnl),
+        });
+        const savedClosed = await manager.save(closed);
+        closedTradeId = savedClosed.id;
+
+        locked.qty = remainingQty;
+        locked.investedInr = moneyString(
+          roundMoney(investedTotal - investedSold),
+        );
+        // Keep OPEN if it was OPEN; leave NEEDS_REVIEW as-is for remainder.
+        await manager.save(account);
+        await manager.save(locked);
+        remainingTradeId = locked.id;
+      }
 
       return {
-        tradeId: locked.id,
+        tradeId: closedTradeId,
+        remainingTradeId,
         symbol: locked.symbol,
         action: ReviewTradeAction.SELL,
-        status: locked.status,
+        status:
+          remainingQty === 0 ? TradeStatus.CLOSED : locked.status,
+        qtySold: sellQty,
+        qtyRemaining: remainingQty,
         sellPrice: mark,
         proceeds,
         realizedPnl: pnl,
         cash: toNumber(account.cash),
+        sellTarget: toNumber(locked.sellTarget),
+        stopLoss: toNumber(locked.stopLoss),
       };
     });
 

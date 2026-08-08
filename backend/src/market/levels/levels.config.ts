@@ -28,12 +28,28 @@ export type LevelsConfig = {
   retestTouchAboveAtr: number;
   retestEntryBelowAtr: number;
   retestEntryAboveAtr: number;
+  /** Max LTP overshoot above buyHigh (ATR) still GREEN. */
   entryChaseAtr: number;
+  /** Max LTP overshoot above buyHigh (ATR) still AMBER; above → RED. */
+  entryAmberAtr: number;
   entryMissedAtr: number;
   stopAtrBuffer: number;
+  /** Soft green stop width as fraction of buyHigh (also adaptive floor via ATR%). */
   maxStopPctReject: number;
+  /** Amber stop width ceiling as fraction of buyHigh. */
+  maxStopPctAmber: number;
+  /** Absolute hard reject stop width (never amber above this). */
+  maxStopPctHard: number;
+  /** Expands green/amber stop ceilings: max(pctKnob, mult * ATR/buyHigh). */
+  stopAdaptiveAtrMult: number;
+  /** Green max stop width in ATR units. */
   maxStopAtrReject: number;
+  /** Amber max stop width in ATR units (slightly looser than green). */
+  maxStopAtrAmber: number;
+  /** Green minimum risk/reward at buyHigh. */
   minTargetRr: number;
+  /** Amber minimum risk/reward (below green, still buyable for AI). */
+  minTargetRrAmber: number;
   maxResistanceTargets: number;
   maxTargetAtr: number;
   /** Sessions after buyAt before time-stop. */
@@ -94,11 +110,17 @@ export function loadLevelsConfig(
     retestEntryBelowAtr: requireNum(env, 'LVL_RETEST_ENTRY_BELOW_ATR'),
     retestEntryAboveAtr: requireNum(env, 'LVL_RETEST_ENTRY_ABOVE_ATR'),
     entryChaseAtr: requireNum(env, 'LVL_ENTRY_CHASE_ATR'),
+    entryAmberAtr: requireNum(env, 'LVL_ENTRY_AMBER_ATR'),
     entryMissedAtr: requireNum(env, 'LVL_ENTRY_MISSED_ATR'),
     stopAtrBuffer: requireNum(env, 'LVL_STOP_ATR_BUFFER'),
     maxStopPctReject: requireNum(env, 'LVL_MAX_STOP_PCT_REJECT'),
+    maxStopPctAmber: requireNum(env, 'LVL_MAX_STOP_PCT_AMBER'),
+    maxStopPctHard: requireNum(env, 'LVL_MAX_STOP_PCT_HARD'),
+    stopAdaptiveAtrMult: requireNum(env, 'LVL_STOP_ADAPTIVE_ATR_MULT'),
     maxStopAtrReject: requireNum(env, 'LVL_MAX_STOP_ATR_REJECT'),
+    maxStopAtrAmber: requireNum(env, 'LVL_MAX_STOP_ATR_AMBER'),
     minTargetRr: requireNum(env, 'LVL_MIN_TARGET_RR'),
+    minTargetRrAmber: requireNum(env, 'LVL_MIN_TARGET_RR_AMBER'),
     maxResistanceTargets: Math.max(
       1,
       Math.floor(requireNum(env, 'LVL_MAX_RESISTANCE_TARGETS')),

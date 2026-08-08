@@ -82,10 +82,24 @@ async function request<T>(
     }
   }
 
-  const res = await fetch(`${API_URL}${path}`, {
-    ...init,
-    headers,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      ...init,
+      headers,
+    });
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const networkish =
+      /load failed|failed to fetch|networkerror|network request failed/i.test(
+        raw,
+      );
+    throw new Error(
+      networkish
+        ? `Cannot reach API at ${API_URL}. Check NEXT_PUBLIC_API_URL and that FRONTEND_ORIGIN on the API allows this site.`
+        : raw || "Network error",
+    );
+  }
 
   if (res.status === 401 && retry && !path.startsWith("/auth/")) {
     const nextAccess = await refreshAccessToken();
@@ -115,6 +129,15 @@ async function request<T>(
       }
     } catch {
       // keep default message
+    }
+    if (
+      res.status === 401 &&
+      (path === "/auth/login" || path === "/auth/register")
+    ) {
+      message =
+        message === `Request failed (${res.status})`
+          ? "Invalid email or password"
+          : message;
     }
     throw new Error(message);
   }
@@ -216,8 +239,29 @@ export function fetchRecommendation(
   recommendationId: string,
   _accessToken?: string | null,
 ) {
-  return request<RecommendationHistoryRun>(
+  return request<RecommendationRun>(
     `/recommendations/${recommendationId}`,
+  );
+}
+
+/** Sole Executable (customizable) plan for today, if any. */
+export async function fetchExecutableRecommendation(
+  _accessToken?: string | null,
+) {
+  const res = await request<{ plan: RecommendationRun | null }>(
+    "/recommendations/executable",
+  );
+  return res.plan;
+}
+
+/** Mark a today's PENDING plan as the sole Executable plan. */
+export function markRecommendationExecutable(
+  recommendationId: string,
+  _accessToken?: string | null,
+) {
+  return request<RecommendationRun>(
+    `/recommendations/${recommendationId}/mark-executable`,
+    { method: "POST" },
   );
 }
 
@@ -244,6 +288,21 @@ export function updateRecommendation(
     method: "PATCH",
     body: JSON.stringify({ items }),
   });
+}
+
+/** Add a Buyable shortlist symbol into the Executable recommendation. */
+export function addBuyableToRecommendation(
+  recommendationId: string,
+  symbol: string,
+  _accessToken?: string | null,
+) {
+  return request<RecommendationRun>(
+    `/recommendations/${recommendationId}/items`,
+    {
+      method: "POST",
+      body: JSON.stringify({ symbol }),
+    },
+  );
 }
 
 export function executeTrades(
@@ -281,6 +340,7 @@ export function reviewTrade(
     action: ReviewTradeAction;
     sellTarget?: number;
     stopLoss?: number;
+    qty?: number;
   },
   _accessToken?: string | null,
 ) {
@@ -294,11 +354,19 @@ export function fetchMe(_accessToken?: string | null) {
   return request<AuthUser>("/auth/me");
 }
 
+export type TriggerJobResult = {
+  ok: boolean;
+  job: string;
+  status?: "success" | "skipped";
+  detail?: string;
+  message?: string;
+};
+
 export function triggerJob(
   job: "nse_sync" | "recommend" | "execute" | "catchup",
   _accessToken?: string | null,
 ) {
-  return request<{ ok: boolean; job: string }>(`/jobs/trigger/${job}`, {
+  return request<TriggerJobResult>(`/jobs/trigger/${job}`, {
     method: "POST",
     body: JSON.stringify({}),
   });

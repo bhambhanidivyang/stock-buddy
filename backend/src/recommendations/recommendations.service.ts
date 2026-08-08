@@ -24,10 +24,19 @@ import {
 } from '../database/enums';
 import type { SuggestedLevels } from '../market/features/candidate.types';
 import { MarketFeatureEngine } from '../market/features/market-feature.engine';
-import { getMarketSession, istDateKey } from '../market/market-clock';
+import {
+  getMarketSession,
+  isSameIstTradingDay,
+  istDateKey,
+} from '../market/market-clock';
+import { normalizeNseSymbol } from '../market/symbols';
+import { AddRecommendationItemDto } from './dtos/add-recommendation-item.dto';
 import { UpdateRecommendationDto } from './dtos/update-recommendation.dto';
 import { ManageHoldingsService } from './manage-holdings.service';
 import { CandidateQuote, normalizePicks } from './pick-validator';
+
+/** Manual + AI plan size soft cap (matches AI pick limit). */
+const MAX_PLAN_ITEMS = 5;
 
 @Injectable()
 export class RecommendationsService {
@@ -55,6 +64,16 @@ export class RecommendationsService {
       order: { createdAt: 'DESC' },
       take,
     });
+    // Demote any EXECUTABLE from a prior IST day so history stays accurate.
+    for (const run of runs) {
+      if (
+        run.status === RecommendationRunStatus.EXECUTABLE &&
+        !isSameIstTradingDay(new Date(run.marketTs))
+      ) {
+        run.status = RecommendationRunStatus.PENDING;
+        await this.runs.save(run);
+      }
+    }
     return runs.map((run) => this.toHistoryDto(run));
   }
 
@@ -67,7 +86,65 @@ export class RecommendationsService {
     if (!run) {
       throw new NotFoundException(`Recommendation ${runId} not found`);
     }
-    return this.toHistoryDto(run);
+    return this.toDetailDto(run);
+  }
+
+  /** Current Executable plan for the account (full customize payload), if any. */
+  async getExecutablePlan(userId: string) {
+    const account = await this.accounts.getAccountForUser(userId);
+    const run = await this.runs.findOne({
+      where: {
+        accountId: account.id,
+        status: RecommendationRunStatus.EXECUTABLE,
+      },
+      relations: ['items', 'executionSessions'],
+      order: { createdAt: 'DESC' },
+    });
+    if (!run) {
+      return { plan: null as null };
+    }
+    if (!isSameIstTradingDay(new Date(run.marketTs))) {
+      // Stale executable from a prior session — demote so UI stays clean.
+      run.status = RecommendationRunStatus.PENDING;
+      await this.runs.save(run);
+      return { plan: null as null };
+    }
+    return { plan: this.toDetailDto(run) };
+  }
+
+  /**
+   * Mark a today's PENDING plan as the sole EXECUTABLE (customizable) plan.
+   * Previous EXECUTABLE for this account becomes PENDING again.
+   */
+  async markExecutablePlan(userId: string, runId: string) {
+    const account = await this.accounts.getAccountForUser(userId);
+    const run = await this.runs.findOne({
+      where: { id: runId, accountId: account.id },
+      relations: ['items', 'executionSessions'],
+    });
+    if (!run) {
+      throw new NotFoundException(`Recommendation ${runId} not found`);
+    }
+    if (!isSameIstTradingDay(new Date(run.marketTs))) {
+      throw new BadRequestException(
+        'Only plans from today\'s IST trading day can be marked Executable',
+      );
+    }
+    if (
+      run.status !== RecommendationRunStatus.PENDING &&
+      run.status !== RecommendationRunStatus.EXECUTABLE
+    ) {
+      throw new BadRequestException(
+        `Recommendation ${runId} is ${run.status}; only PENDING plans can be marked Executable`,
+      );
+    }
+
+    await this.promoteToExecutable(account.id, run);
+    const fresh = await this.runs.findOne({
+      where: { id: run.id },
+      relations: ['items', 'executionSessions'],
+    });
+    return this.toDetailDto(fresh!);
   }
 
   async createRecommendation(userId: string) {
@@ -76,9 +153,15 @@ export class RecommendationsService {
     const marketSession = getMarketSession(marketTs);
     const availableCash = toNumber(account.cash);
     const config = loadRecommendationConfig();
+    const startedMs = Date.now();
+
+    this.logger.log(
+      `Recommendation start user=${userId.slice(0, 8)}… session=${marketSession} cash=${availableCash} mode=${config.ranking.shortlistMode}`,
+    );
 
     await this.assertUnderDailyLimit(account.id, config.maxRecommendationsPerDay);
 
+    this.logger.log('Recommendation stage: building market board…');
     const [board, openTrades] = await Promise.all([
       this.features.buildBoard(config),
       this.trades.find({
@@ -88,14 +171,17 @@ export class RecommendationsService {
         ],
       }),
     ]);
+    this.logger.log(
+      `Recommendation stage: board ready in ${Date.now() - startedMs}ms · openLots=${openTrades.length}`,
+    );
 
     // Manage OPEN lots first (code-owned levels). AI then sees updated exits.
+    this.logger.log('Recommendation stage: managing open holdings…');
     const holdingsManagement = await this.holdings.retargetOpenHoldings({
       openTrades,
       board,
       config,
     });
-
     const openHoldings = openTrades.map((trade) => ({
       symbol: trade.symbol,
       qty: trade.qty,
@@ -118,9 +204,11 @@ export class RecommendationsService {
     ].join(' · ');
 
     const levelsBySymbol = new Map<string, SuggestedLevels>();
+    const buyableSymbols = new Set<string>();
     for (const c of board.candidates) {
-      if (c.suggestedLevels) {
+      if (c.candidateStatus === 'BUYABLE' && c.suggestedLevels) {
         levelsBySymbol.set(c.symbol, c.suggestedLevels);
+        buyableSymbols.add(c.symbol);
       }
     }
 
@@ -173,6 +261,10 @@ export class RecommendationsService {
     let userPrompt = '';
 
     if (!cashTooSmallForNewPicks) {
+      this.logger.log(
+        `Recommendation stage: calling AI with ${aiCandidates.length} candidate(s)…`,
+      );
+      const aiStartedMs = Date.now();
       const plan = await this.openai.createRecommendationPlan({
         marketTs: marketTs.toISOString(),
         marketSession,
@@ -188,7 +280,13 @@ export class RecommendationsService {
       aiMetadata = plan.aiMetadata;
       promptHash = plan.promptHash;
       userPrompt = plan.userPrompt;
+      this.logger.log(
+        `Recommendation stage: AI done in ${Date.now() - aiStartedMs}ms model=${model} picks=${response.picks?.length ?? 0}`,
+      );
     } else {
+      this.logger.log(
+        `Recommendation stage: skip AI (cash ₹${availableCash} < min ₹${config.minDeployCashInr})`,
+      );
       board.pipelineFunnel.sentToAi = 0;
       board.pipelineFunnel.summary = [
         board.pipelineFunnel.summary.replace(/→ AI \d+/, '→ AI 0'),
@@ -225,7 +323,7 @@ export class RecommendationsService {
     const { picks, rejected: validatorRejected } = normalizePicks(
       leveledPicks,
       availableCash,
-      new Set(board.candidates.map((c) => c.symbol)),
+      buyableSymbols,
       quotesBySymbol,
       { config, levelsBySymbol },
     );
@@ -313,6 +411,9 @@ export class RecommendationsService {
       candidateSnapshot: board.candidates,
       eligibilityRejected: board.eligibilityRejected,
       priorityShortlist: board.priorityShortlist,
+      shortlistOutcomes: board.shortlistOutcomes,
+      researchScoredTop: board.researchScoredTop ?? [],
+      rankingDiagnostics: board.rankingDiagnostics ?? null,
       pipelineFunnel,
       aiPayloadNote: config.aiIncludeExtendedTechnical
         ? 'includes technicalExtended'
@@ -368,51 +469,188 @@ export class RecommendationsService {
             ),
           );
 
+    // New generate becomes the sole Executable (customizable) plan.
+    savedRun.items = savedItems;
+    await this.promoteToExecutable(account.id, savedRun);
+
     this.logger.log(
-      `Recommendation ${savedRun.id}: ${pipelineFunnel.summary} | allocated=${totalAllocated} reserved=${cashReserved} | holdingsUpdated=${holdingsManagement.filter((h) => h.changed).length}`,
+      `Recommendation ${savedRun.id}: ${pipelineFunnel.summary} | allocated=${totalAllocated} reserved=${cashReserved} | holdingsUpdated=${holdingsManagement.filter((h) => h.changed).length} | total=${Date.now() - startedMs}ms`,
     );
 
+    const fresh = await this.runs.findOne({
+      where: { id: savedRun.id },
+      relations: ['items', 'executionSessions'],
+    });
+    const detail = this.toDetailDto(fresh!);
     return {
-      id: savedRun.id,
-      status: savedRun.status,
-      marketTs: savedRun.marketTs,
-      marketSession: savedRun.marketSession,
-      availableCash: toNumber(savedRun.availableCash),
-      totalAllocatedInr: toNumber(savedRun.totalAllocatedInr),
-      cashReservedInr: toNumber(savedRun.cashReservedInr),
-      portfolioSummary: savedRun.portfolioSummary,
-      marketRegime: savedRun.marketRegime,
-      confidence: savedRun.confidence,
-      portfolioStrategy: savedRun.portfolioStrategy,
-      model: savedRun.model,
-      pipelineFunnel,
+      ...detail,
       holdingsManagement,
       rejectedCandidates,
       minDeployCashInr: config.minDeployCashInr,
       skipNewBuysReason: cashTooSmallForNewPicks
         ? ('LOW_CASH' as const)
         : null,
-      /** Shortlist → buyable filter outcomes (full 120 accounting). */
-      ...buildShortlistOutcomePayload(board, cashTooSmallForNewPicks),
-      items: savedItems.map((item, index) => ({
-        id: item.id,
-        symbol: item.symbol,
-        qty: item.qty,
-        allocationInr: toNumber(item.allocationInr),
-        buyLow: toNumber(item.buyLow),
-        buyHigh: toNumber(item.buyHigh),
-        sellTarget: toNumber(item.sellTarget),
-        stopLoss: toNumber(item.stopLoss),
-        role: item.role,
-        summary: item.summary,
-        convictionRank: picks[index]?.convictionRank ?? index + 1,
-      })),
     };
   }
 
   /**
-   * Replace editable fields on a PENDING run. Items omitted from the payload
-   * are removed (drop a stock from the plan). New symbols cannot be added here.
+   * Add a BUYABLE shortlist name into the Executable plan (user override of AI).
+   * Levels are copied from the run's stored shortlist outcomes — never invented.
+   */
+  async addBuyableItem(
+    userId: string,
+    runId: string,
+    dto: AddRecommendationItemDto,
+  ) {
+    const account = await this.accounts.getAccountForUser(userId);
+    const run = await this.runs.findOne({
+      where: { id: runId, accountId: account.id },
+      relations: ['items'],
+    });
+    if (!run) {
+      throw new NotFoundException(`Recommendation ${runId} not found`);
+    }
+    if (run.status !== RecommendationRunStatus.EXECUTABLE) {
+      throw new BadRequestException(
+        `Recommendation ${runId} is ${run.status}; only the Executable plan can be edited`,
+      );
+    }
+
+    const symbol = normalizeNseSymbol(dto.symbol);
+    if (!symbol) {
+      throw new BadRequestException('Invalid symbol');
+    }
+
+    const existing = [...(run.items ?? [])].sort(
+      (a, b) => a.sortOrder - b.sortOrder,
+    );
+    if (existing.some((i) => i.symbol === symbol)) {
+      throw new BadRequestException(`${symbol} is already on the buy list`);
+    }
+    if (existing.length >= MAX_PLAN_ITEMS) {
+      throw new BadRequestException(
+        `Buy list already has ${MAX_PLAN_ITEMS} names (maximum)`,
+      );
+    }
+
+    const snap = (run.contextSnapshot ?? {}) as {
+      shortlistOutcomes?: Array<{
+        symbol: string;
+        status: string;
+        buyLow?: number;
+        buyHigh?: number;
+        sellTarget?: number;
+        stopLoss?: number;
+      }>;
+      candidateSnapshot?: Array<{ symbol: string; sector?: string }>;
+    };
+    const outcome = (snap.shortlistOutcomes ?? []).find(
+      (o) => o.symbol === symbol && o.status === 'BUYABLE',
+    );
+    if (
+      !outcome ||
+      outcome.buyLow == null ||
+      outcome.buyHigh == null ||
+      outcome.sellTarget == null ||
+      outcome.stopLoss == null
+    ) {
+      throw new BadRequestException(
+        `${symbol} is not in today's Buyable shortlist with a full trade plan`,
+      );
+    }
+
+    const buyLow = Number(outcome.buyLow);
+    const buyHigh = Number(outcome.buyHigh);
+    const sellTarget = Number(outcome.sellTarget);
+    const stopLoss = Number(outcome.stopLoss);
+    if (
+      !(
+        stopLoss < buyLow &&
+        buyLow < buyHigh &&
+        buyHigh < sellTarget &&
+        buyHigh > 0
+      )
+    ) {
+      throw new BadRequestException(
+        `${symbol}: stored levels failed geometry checks`,
+      );
+    }
+
+    const config = loadRecommendationConfig();
+    const availableCash = toNumber(run.availableCash);
+    const alreadyAllocated = roundMoney(
+      existing.reduce((sum, i) => sum + toNumber(i.allocationInr), 0),
+    );
+    const remaining = roundMoney(availableCash - alreadyAllocated);
+    const maxAlloc = roundMoney(availableCash * config.maxAllocPct);
+    const minAlloc = roundMoney(availableCash * config.minAllocPct);
+    const budget = Math.min(remaining, maxAlloc);
+    const qty = Math.floor(budget / buyHigh);
+    if (qty < 1) {
+      throw new BadRequestException(
+        `Not enough free cash to add ${symbol} (need at least ~₹${buyHigh.toFixed(2)} for 1 share under caps)`,
+      );
+    }
+    let allocation = roundMoney(qty * buyHigh);
+    if (allocation < minAlloc) {
+      throw new BadRequestException(
+        `${symbol}: sized allocation ₹${allocation} is below the ${config.minAllocPct * 100}% minimum (₹${minAlloc})`,
+      );
+    }
+
+    const sector =
+      (snap.candidateSnapshot ?? []).find((c) => c.symbol === symbol)?.sector ??
+      'Unknown';
+    const sectorCount = existing.filter((i) => {
+      const s =
+        (snap.candidateSnapshot ?? []).find((c) => c.symbol === i.symbol)
+          ?.sector ?? 'Unknown';
+      return s === sector;
+    }).length;
+    if (sectorCount >= config.maxPerSector) {
+      throw new BadRequestException(
+        `Already have ${config.maxPerSector} name(s) in sector ${sector}`,
+      );
+    }
+
+    const created = await this.items.save(
+      this.items.create({
+        recommendationRunId: run.id,
+        symbol,
+        qty,
+        allocationInr: moneyString(allocation),
+        buyLow: priceString(buyLow),
+        buyHigh: priceString(buyHigh),
+        sellTarget: priceString(sellTarget),
+        stopLoss: priceString(stopLoss),
+        role: RecommendationItemRole.PRIMARY,
+        summary: `Added from Buyable shortlist (${symbol}).`,
+        sortOrder: existing.length,
+      }),
+    );
+
+    const totalAllocated = roundMoney(alreadyAllocated + allocation);
+    run.totalAllocatedInr = moneyString(totalAllocated);
+    run.cashReservedInr = moneyString(
+      Math.max(0, availableCash - totalAllocated),
+    );
+    await this.runs.save(run);
+
+    this.logger.log(
+      `Recommendation ${run.id}: added buyable ${symbol} qty=${qty} alloc=${allocation}`,
+    );
+
+    const fresh = await this.runs.findOne({
+      where: { id: run.id },
+      relations: ['items', 'executionSessions'],
+    });
+    return this.toDetailDto(fresh!);
+  }
+
+  /**
+   * Replace editable fields on the Executable run. Items omitted from the payload
+   * are removed (drop a stock from the plan). New symbols cannot be added here
+   * — use addBuyableItem for Buyable shortlist adds.
    */
   async updateRecommendation(
     userId: string,
@@ -426,9 +664,9 @@ export class RecommendationsService {
     if (!run) {
       throw new NotFoundException(`Recommendation ${runId} not found`);
     }
-    if (run.status !== RecommendationRunStatus.PENDING) {
+    if (run.status !== RecommendationRunStatus.EXECUTABLE) {
       throw new BadRequestException(
-        `Recommendation ${runId} is ${run.status}; only PENDING plans can be edited`,
+        `Recommendation ${runId} is ${run.status}; only the Executable plan can be edited`,
       );
     }
 
@@ -518,20 +756,97 @@ export class RecommendationsService {
       `Recommendation ${run.id} edited: items=${savedItems.length} removed=${toRemove.length} allocated=${totalAllocated}`,
     );
 
+    const fresh = await this.runs.findOne({
+      where: { id: savedRun.id },
+      relations: ['items', 'executionSessions'],
+    });
+    return this.toDetailDto(fresh!);
+  }
+
+  private async promoteToExecutable(
+    accountId: string,
+    run: RecommendationRun,
+  ): Promise<void> {
+    await this.runs
+      .createQueryBuilder()
+      .update(RecommendationRun)
+      .set({ status: RecommendationRunStatus.PENDING })
+      .where('account_id = :accountId', { accountId })
+      .andWhere('status = :status', {
+        status: RecommendationRunStatus.EXECUTABLE,
+      })
+      .andWhere('id != :runId', { runId: run.id })
+      .execute();
+
+    if (run.status !== RecommendationRunStatus.EXECUTABLE) {
+      run.status = RecommendationRunStatus.EXECUTABLE;
+      await this.runs.save(run);
+    }
+  }
+
+  /** Full customize payload reconstructed from contextSnapshot + items. */
+  private toDetailDto(run: RecommendationRun) {
+    const items = [...(run.items ?? [])].sort(
+      (a, b) => a.sortOrder - b.sortOrder,
+    );
+    const snap = (run.contextSnapshot ?? {}) as {
+      shortlistOutcomes?: Array<{
+        symbol: string;
+        status: 'BUYABLE' | 'WATCH' | 'RED';
+        reasonCode?: string;
+        reason: string | null;
+        buyLow?: number;
+        buyHigh?: number;
+        sellTarget?: number;
+        stopLoss?: number;
+        riskReward?: number;
+        setupType?: string;
+      }>;
+      priorityShortlist?: Array<{ symbol: string }>;
+      pipelineFunnel?: {
+        prioritized?: number;
+        featureReady?: number;
+        [key: string]: unknown;
+      };
+      validator?: { rejected?: Array<{ symbol: string; reason: string }> };
+    };
+    const aiRaw = (run.aiRaw ?? {}) as {
+      response?: { rejectedCandidates?: Array<{ symbol: string; reason: string }> };
+    };
+    const cashBlocked = false;
+    const shortlistPayload = buildShortlistOutcomePayload(
+      {
+        priorityShortlist: snap.priorityShortlist ?? [],
+        shortlistOutcomes: snap.shortlistOutcomes ?? [],
+        pipelineFunnel: snap.pipelineFunnel ?? {},
+      },
+      cashBlocked,
+    );
+    const rejectedCandidates =
+      aiRaw.response?.rejectedCandidates ??
+      snap.validator?.rejected ??
+      [];
+
     return {
-      id: savedRun.id,
-      status: savedRun.status,
-      marketTs: savedRun.marketTs,
-      marketSession: savedRun.marketSession,
-      availableCash: toNumber(savedRun.availableCash),
-      totalAllocatedInr: toNumber(savedRun.totalAllocatedInr),
-      cashReservedInr: toNumber(savedRun.cashReservedInr),
-      portfolioSummary: savedRun.portfolioSummary,
-      marketRegime: savedRun.marketRegime,
-      confidence: savedRun.confidence,
-      portfolioStrategy: savedRun.portfolioStrategy,
-      model: savedRun.model,
-      items: savedItems.map((item, index) => ({
+      id: run.id,
+      status: run.status,
+      createdAt: run.createdAt,
+      marketTs: run.marketTs,
+      marketSession: run.marketSession,
+      availableCash: toNumber(run.availableCash),
+      totalAllocatedInr: toNumber(run.totalAllocatedInr),
+      cashReservedInr: toNumber(run.cashReservedInr),
+      portfolioSummary: run.portfolioSummary,
+      marketRegime: run.marketRegime,
+      confidence: run.confidence,
+      portfolioStrategy: run.portfolioStrategy,
+      model: run.model,
+      pipelineFunnel: snap.pipelineFunnel,
+      rejectedCandidates,
+      isExecutablePlan: run.status === RecommendationRunStatus.EXECUTABLE,
+      canMarkExecutable: false,
+      ...shortlistPayload,
+      items: items.map((item, index) => ({
         id: item.id,
         symbol: item.symbol,
         qty: item.qty,
@@ -542,7 +857,8 @@ export class RecommendationsService {
         stopLoss: toNumber(item.stopLoss),
         role: item.role,
         summary: item.summary,
-        convictionRank: index + 1,
+        convictionRank:
+          (Number.isFinite(item.sortOrder) ? item.sortOrder : index) + 1,
       })),
     };
   }
@@ -557,6 +873,11 @@ export class RecommendationsService {
       executed ||
       run.status === RecommendationRunStatus.EXECUTING ||
       run.status === RecommendationRunStatus.COMPLETED;
+    const today = isSameIstTradingDay(new Date(run.marketTs));
+    const isExecutablePlan =
+      run.status === RecommendationRunStatus.EXECUTABLE;
+    const canMarkExecutable =
+      today && run.status === RecommendationRunStatus.PENDING;
 
     return {
       id: run.id,
@@ -575,6 +896,8 @@ export class RecommendationsService {
       bought,
       boughtLabel: bought ? 'yes' : 'no',
       executionSessionCount: sessions.length,
+      isExecutablePlan,
+      canMarkExecutable,
       items: items.map((item, index) => ({
         id: item.id,
         symbol: item.symbol,
@@ -625,12 +948,15 @@ function buildShortlistOutcomePayload(
     priorityShortlist: Array<{ symbol: string }>;
     shortlistOutcomes: Array<{
       symbol: string;
-      status: 'BUYABLE' | 'REJECTED';
+      status: 'BUYABLE' | 'WATCH' | 'RED';
+      reasonCode?: string;
       reason: string | null;
       buyLow?: number;
       buyHigh?: number;
       sellTarget?: number;
       stopLoss?: number;
+      riskReward?: number;
+      setupType?: string;
     }>;
     pipelineFunnel: { prioritized?: number; featureReady?: number };
   },
@@ -645,22 +971,62 @@ function buildShortlistOutcomePayload(
       buyHigh: o.buyHigh ?? null,
       sellTarget: o.sellTarget ?? null,
       stopLoss: o.stopLoss ?? null,
+      riskReward: o.riskReward ?? null,
+      setupType: o.setupType ?? null,
     }));
-  const setupRejects = outcomes
-    .filter((o) => o.status === 'REJECTED')
+  const watchList = outcomes
+    .filter((o) => o.status === 'WATCH')
     .map((o) => ({
       symbol: o.symbol,
+      reasonCode: o.reasonCode ?? null,
+      reason: humanizeRejectReason(o.reason ?? 'watch'),
+      buyLow: o.buyLow ?? null,
+      buyHigh: o.buyHigh ?? null,
+      sellTarget: o.sellTarget ?? null,
+      stopLoss: o.stopLoss ?? null,
+      riskReward: o.riskReward ?? null,
+      setupType: o.setupType ?? null,
+    }))
+    .sort((a, b) => a.symbol.localeCompare(b.symbol));
+  const redList = outcomes
+    .filter((o) => o.status === 'RED')
+    .map((o) => ({
+      symbol: o.symbol,
+      reasonCode: o.reasonCode ?? null,
       reason: humanizeRejectReason(o.reason ?? 'rejected'),
     }))
     .sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+  // Backward-compatible aliases: setupRejects = WATCH + RED (not buyable now).
+  const setupRejects = [...watchList, ...redList].map((o) => ({
+    symbol: o.symbol,
+    reason: o.reason,
+  }));
+
+  const watchReasonRows = watchList.map((o) => ({
+    symbol: o.symbol,
+    reason: humanizeReasonCode(o.reasonCode) || o.reason,
+  }));
+  const redReasonRows = redList.map((o) => ({
+    symbol: o.symbol,
+    reason: humanizeReasonCode(o.reasonCode) || o.reason,
+  }));
 
   return {
     shortlistedCount:
       board.pipelineFunnel.prioritized ?? board.priorityShortlist.length,
     buyableCount: buyable.length,
+    watchCount: watchList.length,
+    redCount: redList.length,
     setupRejectCount: setupRejects.length,
-    /** Valid entry/stop/target plans from the shortlist (pre-AI). */
+    /** Actionable structural plans (pre-AI). Strong ≠ buyable. */
     buyableShortlist: buyable,
+    /** Strong names that should not be bought at current levels. */
+    watchShortlist: watchList,
+    /** Hard rejects (invalid data / history). */
+    redShortlist: redList,
+    watchReasons: aggregateRejectReasons(watchReasonRows),
+    redReasons: aggregateRejectReasons(redReasonRows),
     setupRejectReasons: aggregateRejectReasons(setupRejects),
     setupRejects,
     /** Why AI may not have been asked even if buyableCount > 0. */
@@ -687,7 +1053,30 @@ function aggregateRejectReasons(
     .map(([reason, count]) => ({ reason, count }));
 }
 
+function humanizeReasonCode(code: string | null | undefined): string | null {
+  if (code == null || !String(code).trim()) return null;
+  const key = String(code).trim().toUpperCase();
+  const map: Record<string, string> = {
+    STOP_TOO_WIDE: 'Stop would risk too much of the position',
+    NO_VALID_ENTRY: 'No clear buy zone from chart structure right now',
+    ENTRY_TOO_EXTENDED: 'Price already ran past a sensible buy zone',
+    TARGET_TOO_CLOSE: 'Upside to next resistance is too small vs risk',
+    NO_STRUCTURAL_TARGET: 'No clear sell target from chart structure',
+    EXCESSIVE_RISK: 'Risk is too high for this account',
+    INVALID_DATA: 'Market data missing or unreliable',
+    SPIKE_SUSPECT: 'Price action looks abnormal / spike-like',
+    BROKEN_STRUCTURE: 'Chart structure looks broken for a long trade',
+    HISTORY_TOO_SHORT: 'Not enough daily history yet',
+    NOT_EVALUATED: 'Not fully checked in this run',
+    OK: 'Ready to consider',
+  };
+  return map[key] ?? null;
+}
+
 function humanizeRejectReason(raw: string): string {
+  const fromCode = humanizeReasonCode(raw);
+  if (fromCode) return fromCode;
+
   const text = raw.trim();
   // Group all "price X < min 20" into one bucket (was flooding the UI as unique lines).
   if (
@@ -707,20 +1096,34 @@ function humanizeRejectReason(raw: string): string {
   if (/missing core technicals/i.test(text)) {
     return 'Missing indicators needed for a valid trade plan';
   }
-  if (/NO_SETUP/i.test(text)) {
-    return 'No pullback/breakout setup on the chart right now';
+  if (/ENTRY_TOO_EXTENDED|ENTRY_EXTENDED/i.test(text)) {
+    return 'Entry already moved too far (extended)';
   }
-  if (/NO_STOP_STRUCTURE|STOP_INSIDE|STOP_TOO_WIDE/i.test(text)) {
-    return 'No safe stop-loss from chart structure';
+  if (/NO_VALID_ENTRY|NO_SETUP|ENTRY_MISSED/i.test(text)) {
+    return 'No defensible buy entry from market structure right now';
   }
-  if (/NO_TARGET|TARGET_NOT_ABOVE|TARGET_UNREALISTIC/i.test(text)) {
-    return 'No realistic sell target from chart structure';
+  if (/STOP_TOO_WIDE|NO_STOP_STRUCTURE|STOP_INSIDE/i.test(text)) {
+    return 'Stop geometry unattractive or missing from structure';
+  }
+  if (/TARGET_TOO_CLOSE|RR_TOO_LOW/i.test(text)) {
+    return 'Target/resistance too close for attractive risk/reward';
+  }
+  if (/NO_STRUCTURAL_TARGET|NO_TARGET|TARGET_NOT_ABOVE|TARGET_UNREALISTIC/i.test(
+    text,
+  )) {
+    return 'No structural sell target above entry';
+  }
+  if (/EXCESSIVE_RISK/i.test(text)) {
+    return 'Risk objectively too high';
+  }
+  if (/INVALID_DATA|INSUFFICIENT_FEATURES/i.test(text)) {
+    return 'Invalid or insufficient market data';
   }
   if (/NO_ENTRY|entry/i.test(text) && /tradePlan/i.test(text)) {
     return 'No valid buy entry zone';
   }
   if (/RR|risk.?reward|minTargetRr/i.test(text)) {
-    return 'Risk/reward below minimum';
+    return 'Risk/reward geometry unattractive';
   }
   if (/tradePlan\s+(\w+)/i.test(text)) {
     const code = text.match(/tradePlan\s+(\w+)/i)?.[1] ?? 'INVALID';

@@ -9,11 +9,24 @@ type Props = {
   fallbackUser?: AuthUser | null;
 };
 
+type JobFeedback = {
+  kind: "success" | "skipped" | "error";
+  text: string;
+};
+
+function Spinner({ className = "" }: { className?: string }) {
+  return (
+    <span
+      className={`inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-r-transparent ${className}`}
+      aria-hidden
+    />
+  );
+}
+
 export function SettingsPanel({ accessToken, fallbackUser }: Props) {
   const [profile, setProfile] = useState<AuthUser | null>(fallbackUser ?? null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<JobFeedback | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -31,21 +44,25 @@ export function SettingsPanel({ accessToken, fallbackUser }: Props) {
     };
   }, [accessToken]);
 
-  async function runJob(job: "nse_sync" | "catchup") {
-    setBusy(job);
-    setError(null);
-    setMessage(null);
+  async function syncMarketData() {
+    setBusy(true);
+    setFeedback(null);
     try {
-      await triggerJob(job, accessToken);
-      setMessage(
-        job === "nse_sync"
-          ? "Market sync started (NSE equity master + bhav)."
-          : "Catch-up jobs triggered.",
-      );
+      const result = await triggerJob("nse_sync", accessToken);
+      const status = result.status ?? "success";
+      setFeedback({
+        kind: status === "skipped" ? "skipped" : "success",
+        text:
+          result.detail?.trim() ||
+          "Market data sync finished.",
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Job failed");
+      setFeedback({
+        kind: "error",
+        text: err instanceof Error ? err.message : "Something went wrong.",
+      });
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   }
 
@@ -74,42 +91,57 @@ export function SettingsPanel({ accessToken, fallbackUser }: Props) {
         </p>
       </section>
 
-      <section className="rounded-xl border border-stone-200 bg-white/80 p-4 shadow-sm">
-        <h2 className="text-base font-semibold text-stone-900">Ops</h2>
-        <p className="mt-1 text-sm text-stone-600">
-          Manual triggers for the VM / local box. Prefer the IST scheduler in production
-          (<code className="text-xs">SCHEDULER_ENABLED</code>).
-        </p>
-        <div className="mt-4 flex flex-wrap gap-3">
+      <section className="space-y-3">
+        <article className="flex flex-col rounded-xl border border-stone-200 bg-white/80 p-4 shadow-sm">
+          <h3 className="text-sm font-semibold text-stone-900">
+            Sync market data
+          </h3>
+          <p className="mt-2 text-sm text-stone-600">
+            Downloads the latest stock list and about a month of official NSE
+            end-of-day prices. This keeps liquidity filters and 20-day return
+            ranking accurate. Safe to run anytime; it only fills missing days.
+          </p>
           <button
             type="button"
-            disabled={busy != null}
-            onClick={() => void runJob("nse_sync")}
-            className="rounded-lg bg-teal-800 px-3 py-2 text-sm font-semibold text-white hover:bg-teal-900 disabled:opacity-60"
+            disabled={busy}
+            onClick={() => void syncMarketData()}
+            className="mt-4 inline-flex items-center justify-center gap-2 self-start rounded-lg bg-teal-800 px-3 py-2 text-sm font-semibold text-white hover:bg-teal-900 disabled:opacity-60"
           >
-            {busy === "nse_sync" ? "Syncing…" : "Sync market data"}
+            {busy ? (
+              <>
+                <Spinner className="text-white" />
+                Syncing market data…
+              </>
+            ) : (
+              "Sync market data"
+            )}
           </button>
-          <button
-            type="button"
-            disabled={busy != null}
-            onClick={() => void runJob("catchup")}
-            className="rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm font-semibold text-stone-800 hover:bg-stone-50 disabled:opacity-60"
-          >
-            {busy === "catchup" ? "Running…" : "Run catch-up"}
-          </button>
-        </div>
+          {busy ? (
+            <p className="mt-3 text-sm text-stone-500" role="status">
+              This can take up to a minute while missing trading days download.
+            </p>
+          ) : null}
+          <JobStatus feedback={feedback} />
+        </article>
       </section>
-
-      {error ? (
-        <p className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-800" role="alert">
-          {error}
-        </p>
-      ) : null}
-      {message ? (
-        <p className="rounded-md bg-teal-50 px-3 py-2 text-sm text-teal-900" role="status">
-          {message}
-        </p>
-      ) : null}
     </div>
+  );
+}
+
+function JobStatus({ feedback }: { feedback: JobFeedback | null }) {
+  if (!feedback) return null;
+  const styles =
+    feedback.kind === "error"
+      ? "bg-rose-50 text-rose-800"
+      : feedback.kind === "skipped"
+        ? "bg-amber-50 text-amber-900"
+        : "bg-teal-50 text-teal-900";
+  return (
+    <p
+      className={`mt-3 rounded-md px-3 py-2 text-sm ${styles}`}
+      role={feedback.kind === "error" ? "alert" : "status"}
+    >
+      {feedback.text}
+    </p>
   );
 }

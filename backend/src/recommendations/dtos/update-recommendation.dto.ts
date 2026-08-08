@@ -1,6 +1,5 @@
 import { Type } from 'class-transformer';
 import {
-  ArrayMinSize,
   IsArray,
   IsNumber,
   IsUUID,
@@ -44,8 +43,8 @@ export class UpdateRecommendationItemDto {
 }
 
 export class UpdateRecommendationDto {
+  /** Empty array clears the buy list (user removed every name). */
   @IsArray()
-  @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => UpdateRecommendationItemDto)
   items: UpdateRecommendationItemDto[];
