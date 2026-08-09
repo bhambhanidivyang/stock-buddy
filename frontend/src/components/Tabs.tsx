@@ -61,17 +61,22 @@ export function TabPanel({
   id,
   active,
   children,
+  /** Once true, stay mounted when inactive so in-flight work (e.g. Get recommendations) survives tab switches. */
+  keepMounted = false,
 }: {
   id: string;
   active: string;
   children: React.ReactNode;
+  keepMounted?: boolean;
 }) {
-  if (id !== active) return null;
+  const selected = id === active;
+  if (!selected && !keepMounted) return null;
   return (
     <div
       role="tabpanel"
       id={`panel-${id}`}
       aria-labelledby={`tab-${id}`}
+      hidden={!selected}
     >
       {children}
     </div>

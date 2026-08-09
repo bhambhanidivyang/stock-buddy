@@ -38,6 +38,20 @@ function DashboardContent() {
   const { user, accessToken, refreshToken } = useAuth();
   const router = useRouter();
   const [tab, setTab] = useState<TabId>("overview");
+  /** Keep visited panels mounted so in-flight requests (esp. recommendations) survive tab switches. */
+  const [visitedTabs, setVisitedTabs] = useState<Set<TabId>>(
+    () => new Set<TabId>(["overview"]),
+  );
+
+  const selectTab = useCallback((id: TabId) => {
+    setTab(id);
+    setVisitedTabs((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, []);
 
   const [balance, setBalance] = useState<BalanceSnapshot | null>(null);
   const [portfolio, setPortfolio] = useState<PortfolioSnapshot | null>(null);
@@ -133,7 +147,7 @@ function DashboardContent() {
       <CashSummary
         balance={balance}
         loading={bookLoading}
-        onOpenReview={() => setTab("portfolio")}
+        onOpenReview={() => selectTab("portfolio")}
       />
 
       <Tabs
@@ -146,9 +160,13 @@ function DashboardContent() {
           { id: "settings", label: "Settings" },
         ]}
         active={tab}
-        onChange={setTab}
+        onChange={selectTab}
       >
-        <TabPanel id="overview" active={tab}>
+        <TabPanel
+          id="overview"
+          active={tab}
+          keepMounted={visitedTabs.has("overview")}
+        >
           <OverviewPanel
             balance={balance}
             portfolio={portfolio}
@@ -157,12 +175,16 @@ function DashboardContent() {
             statementsLoading={statementsLoading}
             loading={bookLoading}
             error={bookError}
-            onGoPortfolio={() => setTab("portfolio")}
-            onGoExecution={() => setTab("execution")}
-            onGoRecommendations={() => setTab("recommendations")}
+            onGoPortfolio={() => selectTab("portfolio")}
+            onGoExecution={() => selectTab("execution")}
+            onGoRecommendations={() => selectTab("recommendations")}
           />
         </TabPanel>
-        <TabPanel id="portfolio" active={tab}>
+        <TabPanel
+          id="portfolio"
+          active={tab}
+          keepMounted={visitedTabs.has("portfolio")}
+        >
           <PortfolioPanel
             portfolio={portfolio}
             loading={bookLoading}
@@ -171,27 +193,43 @@ function DashboardContent() {
             onChanged={() => void refreshBook()}
           />
         </TabPanel>
-        <TabPanel id="recommendations" active={tab}>
+        <TabPanel
+          id="recommendations"
+          active={tab}
+          keepMounted={visitedTabs.has("recommendations")}
+        >
           <RecommendationsPanel
             accessToken={accessToken}
             onExecuted={() => void refreshBook()}
           />
         </TabPanel>
-        <TabPanel id="execution" active={tab}>
+        <TabPanel
+          id="execution"
+          active={tab}
+          keepMounted={visitedTabs.has("execution")}
+        >
           <ExecutionPanel
             accessToken={accessToken}
             status={executeStatus}
             onStatus={setExecuteStatus}
           />
         </TabPanel>
-        <TabPanel id="statements" active={tab}>
+        <TabPanel
+          id="statements"
+          active={tab}
+          keepMounted={visitedTabs.has("statements")}
+        >
           <StatementTable
             rows={rows}
             loading={statementsLoading}
             error={statementsError}
           />
         </TabPanel>
-        <TabPanel id="settings" active={tab}>
+        <TabPanel
+          id="settings"
+          active={tab}
+          keepMounted={visitedTabs.has("settings")}
+        >
           <SettingsPanel accessToken={accessToken} fallbackUser={user} />
         </TabPanel>
       </Tabs>
