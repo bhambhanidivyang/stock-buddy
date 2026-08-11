@@ -340,6 +340,22 @@ export class ExecuteService implements OnModuleInit {
       sessionRunning: Boolean(session),
     });
 
+    const realizedPnlToday = round2(
+      legs
+        .filter((l) => l.state === 'SOLD')
+        .reduce((sum, l) => sum + (l.realizedPnl ?? 0), 0),
+    );
+    const unrealizedPnlOpen = round2(
+      legs
+        .filter((l) => l.state === 'OPEN' || l.state === 'NEEDS_REVIEW')
+        .reduce((sum, l) => sum + (l.unrealizedPnl ?? 0), 0),
+    );
+    const qtyBoughtToday = legs
+      .filter((l) => l.qtyBought > 0)
+      .reduce((sum, l) => sum + l.qtyBought, 0);
+    const qtyHeld = legs.reduce((sum, l) => sum + l.qtyHeld, 0);
+    const qtySoldToday = legs.reduce((sum, l) => sum + l.qtySold, 0);
+
     return {
       status: session ? ('RUNNING' as const) : ('IDLE' as const),
       phase,
@@ -353,6 +369,11 @@ export class ExecuteService implements OnModuleInit {
       needsReviewPositions,
       soldPositions,
       managingExits,
+      qtyBoughtToday,
+      qtyHeld,
+      qtySoldToday,
+      realizedPnlToday,
+      unrealizedPnlOpen,
       lastSession: lastSession
         ? {
             sessionId: lastSession.id,
@@ -365,6 +386,119 @@ export class ExecuteService implements OnModuleInit {
       legs,
       asOf: new Date().toISOString(),
       day: istDateKey(),
+    };
+  }
+
+  /**
+   * Past execution sessions (newest first) with per-trade fill detail.
+   * Includes buy/sell prices, qty, exit reason, and realized P&L from DB.
+   */
+  async listHistory(userId: string, limit = 30) {
+    const account = await this.accounts.getAccountForUser(userId);
+    const take = Math.min(100, Math.max(1, Math.floor(limit)));
+    const sessions = await this.sessions.find({
+      where: { accountId: account.id },
+      order: { startedAt: 'DESC' },
+      take,
+    });
+    if (sessions.length === 0) {
+      return [];
+    }
+
+    const sessionIds = sessions.map((s) => s.id);
+    const trades = await this.trades.find({
+      where: { executionSessionId: In(sessionIds) },
+      order: { createdAt: 'ASC' },
+    });
+    const bySession = new Map<string, Trade[]>();
+    for (const trade of trades) {
+      const list = bySession.get(trade.executionSessionId) ?? [];
+      list.push(trade);
+      bySession.set(trade.executionSessionId, list);
+    }
+
+    return sessions.map((session) => {
+      const sessionTrades = bySession.get(session.id) ?? [];
+      const legs = sessionTrades.map((trade) =>
+        this.toHistoryLeg(trade),
+      );
+      const filledBuys = legs.filter((l) => l.qtyBought > 0);
+      const sold = legs.filter((l) => l.qtySold > 0);
+      const stillOpen = legs.filter(
+        (l) => l.state === 'OPEN' || l.state === 'NEEDS_REVIEW',
+      );
+      const realizedPnl = round2(
+        sold.reduce((sum, l) => sum + (l.realizedPnl ?? 0), 0),
+      );
+
+      return {
+        sessionId: session.id,
+        status: session.status,
+        stopReason: session.stopReason,
+        startedAt: session.startedAt,
+        stoppedAt: session.stoppedAt,
+        recommendationId: session.recommendationRunId,
+        tradeCount: legs.length,
+        qtyBought: filledBuys.reduce((sum, l) => sum + l.qtyBought, 0),
+        qtySold: sold.reduce((sum, l) => sum + l.qtySold, 0),
+        qtyHeld: stillOpen.reduce((sum, l) => sum + l.qtyHeld, 0),
+        realizedPnl,
+        legs,
+      };
+    });
+  }
+
+  private toHistoryLeg(trade: Trade) {
+    const buyPrice =
+      trade.buyPrice != null ? toNumber(trade.buyPrice) : null;
+    const sellPrice =
+      trade.sellPrice != null ? toNumber(trade.sellPrice) : null;
+    const realizedPnl =
+      trade.realizedPnl != null ? toNumber(trade.realizedPnl) : null;
+    const isSold =
+      trade.status === TradeStatus.CLOSED &&
+      trade.exitReason != null &&
+      trade.exitReason !== TradeExitReason.CANCELLED_EOD &&
+      trade.exitReason !== TradeExitReason.CANCELLED_SUPERSEDED;
+    const isCancelled =
+      trade.status === TradeStatus.CLOSED &&
+      (trade.exitReason === TradeExitReason.CANCELLED_EOD ||
+        trade.exitReason === TradeExitReason.CANCELLED_SUPERSEDED);
+    const isOpen =
+      trade.status === TradeStatus.OPEN ||
+      trade.status === TradeStatus.NEEDS_REVIEW;
+    const isWaiting = trade.status === TradeStatus.WAITING_BUY;
+
+    let state:
+      | 'WAITING_BUY'
+      | 'OPEN'
+      | 'NEEDS_REVIEW'
+      | 'SOLD'
+      | 'CANCELLED' = 'OPEN';
+    if (isWaiting) state = 'WAITING_BUY';
+    else if (trade.status === TradeStatus.NEEDS_REVIEW) state = 'NEEDS_REVIEW';
+    else if (isSold) state = 'SOLD';
+    else if (isCancelled) state = 'CANCELLED';
+    else if (isOpen) state = 'OPEN';
+
+    return {
+      tradeId: trade.id,
+      symbol: trade.symbol,
+      qty: trade.qty,
+      state,
+      exitReason: trade.exitReason,
+      buyLow: toNumber(trade.buyLow),
+      buyHigh: toNumber(trade.buyHigh),
+      buyPrice,
+      sellTarget: toNumber(trade.sellTarget),
+      stopLoss: toNumber(trade.stopLoss),
+      sellPrice: isSold ? sellPrice : null,
+      qtyBought: isWaiting || isCancelled ? 0 : trade.qty,
+      qtyHeld: isOpen ? trade.qty : 0,
+      qtySold: isSold ? trade.qty : 0,
+      realizedPnl: isSold ? realizedPnl : null,
+      buyAt: trade.buyAt,
+      sellAt: trade.sellAt,
     };
   }
 
@@ -394,22 +528,31 @@ export class ExecuteService implements OnModuleInit {
         stopLoss,
         mark,
         sellPrice: null,
+        priceKind: mark != null ? ('MARK' as const) : null,
+        qtyBought: 0,
+        qtyHeld: 0,
+        qtySold: 0,
         exitReason: null,
         realizedPnl: null,
+        unrealizedPnl: null,
         buyAt: null,
         sellAt: null,
       };
     }
 
     if (trade.status === TradeStatus.OPEN) {
+      const unrealizedPnl =
+        mark != null && buyPrice != null
+          ? round2((mark - buyPrice) * trade.qty)
+          : null;
       return {
         tradeId: trade.id,
         symbol: trade.symbol,
         qty: trade.qty,
         role: trade.role,
         state: 'OPEN' as const,
-        statusLabel: 'Open',
-        detail: `Chasing sell target ${sellTarget} (stop ${stopLoss})`,
+        statusLabel: 'Holding',
+        detail: `Holding ${trade.qty} · chasing target ${sellTarget} (stop ${stopLoss})`,
         buyLow: toNumber(trade.buyLow),
         buyHigh: toNumber(trade.buyHigh),
         buyPrice,
@@ -417,14 +560,23 @@ export class ExecuteService implements OnModuleInit {
         stopLoss,
         mark,
         sellPrice: null,
+        priceKind: mark != null ? ('MARK' as const) : null,
+        qtyBought: trade.qty,
+        qtyHeld: trade.qty,
+        qtySold: 0,
         exitReason: null,
         realizedPnl: null,
+        unrealizedPnl,
         buyAt: trade.buyAt,
         sellAt: null,
       };
     }
 
     if (trade.status === TradeStatus.NEEDS_REVIEW) {
+      const unrealizedPnl =
+        mark != null && buyPrice != null
+          ? round2((mark - buyPrice) * trade.qty)
+          : null;
       return {
         tradeId: trade.id,
         symbol: trade.symbol,
@@ -432,7 +584,7 @@ export class ExecuteService implements OnModuleInit {
         role: trade.role,
         state: 'NEEDS_REVIEW' as const,
         statusLabel: 'Needs review',
-        detail: 'Parked — no auto sell; decide in Portfolio',
+        detail: `Holding ${trade.qty} parked — decide in Portfolio`,
         buyLow: toNumber(trade.buyLow),
         buyHigh: toNumber(trade.buyHigh),
         buyPrice,
@@ -440,8 +592,13 @@ export class ExecuteService implements OnModuleInit {
         stopLoss,
         mark,
         sellPrice: null,
+        priceKind: mark != null ? ('MARK' as const) : null,
+        qtyBought: trade.qty,
+        qtyHeld: trade.qty,
+        qtySold: 0,
         exitReason: null,
         realizedPnl: null,
+        unrealizedPnl,
         buyAt: trade.buyAt,
         sellAt: null,
       };
@@ -464,8 +621,13 @@ export class ExecuteService implements OnModuleInit {
       stopLoss,
       mark: null,
       sellPrice,
+      priceKind: sellPrice != null ? ('SOLD' as const) : null,
+      qtyBought: trade.qty,
+      qtyHeld: 0,
+      qtySold: trade.qty,
       exitReason: trade.exitReason,
       realizedPnl,
+      unrealizedPnl: null,
       buyAt: trade.buyAt,
       sellAt: trade.sellAt,
     };
@@ -603,4 +765,8 @@ function soldStatusLabel(reason: TradeExitReason | null): {
           `Sold @ ${sellPrice ?? '—'}${pnl != null ? ` · P&L ${pnl}` : ''}`,
       };
   }
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
 }

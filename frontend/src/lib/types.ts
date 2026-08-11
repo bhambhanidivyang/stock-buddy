@@ -274,8 +274,14 @@ export type ExecutionLeg = {
   stopLoss: number;
   mark: number | null;
   sellPrice: number | null;
+  /** Explicit: live mark vs filled sell — never ambiguous. */
+  priceKind?: "MARK" | "SOLD" | null;
+  qtyBought?: number;
+  qtyHeld?: number;
+  qtySold?: number;
   exitReason: string | null;
   realizedPnl: number | null;
+  unrealizedPnl?: number | null;
   buyAt: string | null;
   sellAt: string | null;
 };
@@ -293,10 +299,50 @@ export type ExecuteStatus = {
   needsReviewPositions: number;
   soldPositions: number;
   managingExits: boolean;
+  qtyBoughtToday?: number;
+  qtyHeld?: number;
+  qtySoldToday?: number;
+  realizedPnlToday?: number;
+  unrealizedPnlOpen?: number;
   lastSession: ExecuteLastSession | null;
   legs: ExecutionLeg[];
   asOf: string;
   day: string;
+};
+
+export type ExecutionHistoryLeg = {
+  tradeId: string;
+  symbol: string;
+  qty: number;
+  state: ExecutionLegState | "CANCELLED";
+  exitReason: string | null;
+  buyLow: number;
+  buyHigh: number;
+  buyPrice: number | null;
+  sellTarget: number;
+  stopLoss: number;
+  sellPrice: number | null;
+  qtyBought: number;
+  qtyHeld: number;
+  qtySold: number;
+  realizedPnl: number | null;
+  buyAt: string | null;
+  sellAt: string | null;
+};
+
+export type ExecutionHistorySession = {
+  sessionId: string;
+  status: string;
+  stopReason: string | null;
+  startedAt: string;
+  stoppedAt: string | null;
+  recommendationId: string;
+  tradeCount: number;
+  qtyBought: number;
+  qtySold: number;
+  qtyHeld: number;
+  realizedPnl: number;
+  legs: ExecutionHistoryLeg[];
 };
 
 export type ExecuteStopResult =

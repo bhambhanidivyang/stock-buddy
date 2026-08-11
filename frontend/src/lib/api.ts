@@ -5,6 +5,7 @@ import type {
   ExecuteResult,
   ExecuteStatus,
   ExecuteStopResult,
+  ExecutionHistorySession,
   PortfolioSnapshot,
   RecommendationHistoryRun,
   RecommendationRun,
@@ -325,6 +326,15 @@ export function fetchPortfolio(_accessToken?: string | null) {
 
 export function fetchExecuteStatus(_accessToken?: string | null) {
   return request<ExecuteStatus>("/execute/status");
+}
+
+export function fetchExecuteHistory(
+  _accessToken?: string | null,
+  limit = 30,
+) {
+  return request<ExecutionHistorySession[]>(
+    `/execute/history?limit=${limit}`,
+  );
 }
 
 export function stopExecution(_accessToken?: string | null) {
