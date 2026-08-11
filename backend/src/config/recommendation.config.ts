@@ -10,7 +10,7 @@ import {
 export const SCHEMA_VERSION = 1;
 export const FEATURE_VERSION = 3;
 export const CONFIG_VERSION = 6;
-export const PROMPT_VERSION = 'portfolio-manager-v8-buyable-watch-red';
+export const PROMPT_VERSION = 'portfolio-manager-v9-ratio-deploy';
 
 export type StrategyProfile = 'day' | 'swing';
 

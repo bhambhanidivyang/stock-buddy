@@ -1,4 +1,5 @@
 import type {
+  ActivityLogDay,
   AuthResponse,
   AuthUser,
   BalanceSnapshot,
@@ -362,6 +363,13 @@ export function reviewTrade(
 
 export function fetchMe(_accessToken?: string | null) {
   return request<AuthUser>("/auth/me");
+}
+
+export function fetchActivityLogs(
+  _accessToken?: string | null,
+  days = 21,
+) {
+  return request<ActivityLogDay[]>(`/logs?days=${days}`);
 }
 
 export type TriggerJobResult = {

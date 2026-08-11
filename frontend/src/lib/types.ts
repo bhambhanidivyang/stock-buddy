@@ -349,6 +349,23 @@ export type ExecuteStopResult =
   | { status: "IDLE" }
   | { status: "STOPPED"; sessionId: string; stopReason?: string };
 
+export type ActivityLogCategory = "RECOMMENDATION" | "EXECUTION";
+
+export type ActivityLogEvent = {
+  id: string;
+  category: ActivityLogCategory;
+  eventCode: string;
+  message: string;
+  meta: Record<string, unknown> | null;
+  refId: string | null;
+  createdAt: string;
+};
+
+export type ActivityLogDay = {
+  dayKey: string;
+  events: ActivityLogEvent[];
+};
+
 export type ReviewTradeAction = "SELL" | "RESUME" | "MODIFY";
 
 export type ReviewTradeResult = {

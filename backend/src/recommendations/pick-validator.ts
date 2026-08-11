@@ -87,12 +87,6 @@ export function normalizePicks(
     const sellTarget = suggested.sellTarget;
     const stopLoss = suggested.stopLoss;
 
-    const qty = Math.floor(Number(pick.qty));
-    if (!Number.isFinite(qty) || qty <= 0) {
-      pushReject(symbol, 'invalid qty');
-      continue;
-    }
-
     // Geometry + RR always at worst-case fill (buyHigh) — Structure+ATR contract.
     if (!(stopLoss < buyLow && buyLow < buyHigh && buyHigh < sellTarget)) {
       pushReject(
@@ -132,20 +126,16 @@ export function normalizePicks(
       }
     }
 
-    const allocationInr = roundMoney(
-      Number.isFinite(pick.allocationInr) && pick.allocationInr > 0
-        ? pick.allocationInr
-        : qty * mid,
-    );
-
     const convictionRank = Number.isFinite(Number(pick.convictionRank))
       ? Math.max(1, Math.floor(Number(pick.convictionRank)))
       : 99;
 
+    const investRatioPct = Number(pick.investRatioPct);
     const next: AiRecommendationPick = {
       symbol,
-      qty,
-      allocationInr,
+      qty: 1, // resized below from investRatioPct
+      allocationInr: 0,
+      investRatioPct: Number.isFinite(investRatioPct) ? investRatioPct : 0,
       buyLow,
       buyHigh,
       sellTarget,
@@ -160,8 +150,7 @@ export function normalizePicks(
     if (existing) {
       merged.set(symbol, {
         ...existing,
-        qty: existing.qty + next.qty,
-        allocationInr: roundMoney(existing.allocationInr + next.allocationInr),
+        investRatioPct: existing.investRatioPct + next.investRatioPct,
         convictionRank: Math.min(existing.convictionRank, next.convictionRank),
         summary: `${existing.summary} | Merged duplicate pick: ${next.summary}`,
       });
@@ -172,8 +161,7 @@ export function normalizePicks(
   }
 
   const sectorCounts = new Map<string, number>();
-  const cashFit: AiRecommendationPick[] = [];
-  let allocated = 0;
+  const qualified: AiRecommendationPick[] = [];
 
   const ordered = [...merged.values()].sort(
     (a, b) => a.convictionRank - b.convictionRank,
@@ -189,43 +177,124 @@ export function normalizePicks(
       );
       continue;
     }
+    qualified.push(pick);
+    sectorCounts.set(sector, sectorCount + 1);
+  }
 
+  const cashFit = sizeByInvestRatios(
+    qualified,
+    availableCash,
+    maxAlloc,
+    minAlloc,
+    config,
+    pushReject,
+  );
+
+  return {
+    picks: cashFit.map((pick, index) => ({
+      ...pick,
+      convictionRank: index + 1,
+    })),
+    rejected,
+  };
+}
+
+/** Max share for a HEDGE sleeve (percent of cash). */
+const HEDGE_MAX_RATIO_PCT = 20;
+
+/**
+ * Distribute availableCash by AI investRatioPct (renormalized), respecting
+ * per-name maxAlloc and optional HEDGE cap. Qty from buyHigh (worst-case).
+ */
+function sizeByInvestRatios(
+  picks: AiRecommendationPick[],
+  availableCash: number,
+  maxAlloc: number,
+  minAlloc: number,
+  config: RecommendationConfig,
+  pushReject: (symbol: string, reason: string) => void,
+): AiRecommendationPick[] {
+  if (picks.length === 0) {
+    return [];
+  }
+
+  const maxRatioPct = config.maxAllocPct * 100;
+  let working = picks.map((p, i) => {
+    let ratio =
+      Number.isFinite(p.investRatioPct) && p.investRatioPct > 0
+        ? p.investRatioPct
+        : 0;
+    return { ...p, investRatioPct: ratio, _order: i };
+  });
+
+  const ratioSum = working.reduce((s, p) => s + p.investRatioPct, 0);
+  if (!(ratioSum > 0)) {
+    // Equal weight fallback when AI omitted ratios.
+    const eq = 100 / working.length;
+    working = working.map((p) => ({ ...p, investRatioPct: eq }));
+    logger.warn(
+      `AI omitted investRatioPct — using equal ${eq.toFixed(1)}% × ${working.length}`,
+    );
+  } else {
+    working = working.map((p) => ({
+      ...p,
+      investRatioPct: (p.investRatioPct / ratioSum) * 100,
+    }));
+  }
+
+  // Cap HEDGE + per-name max, then renormalize.
+  working = working.map((p) => {
+    let cap = maxRatioPct;
+    if (p.role === 'HEDGE') {
+      cap = Math.min(cap, HEDGE_MAX_RATIO_PCT);
+    }
+    return {
+      ...p,
+      investRatioPct: Math.min(p.investRatioPct, cap),
+    };
+  });
+  const cappedSum = working.reduce((s, p) => s + p.investRatioPct, 0);
+  if (cappedSum > 0) {
+    working = working.map((p) => ({
+      ...p,
+      investRatioPct: (p.investRatioPct / cappedSum) * 100,
+    }));
+  }
+
+  const sized: AiRecommendationPick[] = [];
+  let allocated = 0;
+
+  for (const pick of working) {
     const mid = (pick.buyLow + pick.buyHigh) / 2;
-    if (mid <= 0) {
-      pushReject(pick.symbol, 'invalid mid price');
+    const priceBasis = pick.buyHigh > 0 ? pick.buyHigh : mid;
+    if (!(priceBasis > 0)) {
+      pushReject(pick.symbol, 'invalid mid/buyHigh for sizing');
       continue;
     }
 
-    let { qty, allocationInr } = pick;
+    let targetAlloc = roundMoney(
+      (availableCash * pick.investRatioPct) / 100,
+    );
+    targetAlloc = Math.min(targetAlloc, maxAlloc);
 
-    if (allocationInr > maxAlloc) {
-      const cappedQty = Math.floor(maxAlloc / mid);
-      if (cappedQty <= 0) {
-        pushReject(
-          pick.symbol,
-          `cannot fit under max ${config.maxAllocPct * 100}% cap`,
-        );
-        continue;
-      }
-      qty = cappedQty;
-      allocationInr = roundMoney(qty * mid);
-      logger.warn(
-        `Capped ${pick.symbol} to max ${config.maxAllocPct * 100}% → ${allocationInr}`,
+    let qty = Math.floor(targetAlloc / priceBasis);
+    if (qty <= 0) {
+      pushReject(
+        pick.symbol,
+        `ratio ${pick.investRatioPct.toFixed(1)}% cannot buy 1 share @ ${priceBasis}`,
       );
+      continue;
     }
 
+    let allocationInr = roundMoney(qty * priceBasis);
     if (allocated + allocationInr > availableCash) {
       const remaining = roundMoney(availableCash - allocated);
-      if (remaining < mid) {
-        pushReject(pick.symbol, 'insufficient remaining cash');
-        continue;
-      }
-      qty = Math.floor(remaining / mid);
+      qty = Math.floor(remaining / priceBasis);
       if (qty <= 0) {
         pushReject(pick.symbol, 'insufficient remaining cash');
         continue;
       }
-      allocationInr = roundMoney(qty * mid);
+      allocationInr = roundMoney(qty * priceBasis);
     }
 
     if (allocationInr < minAlloc) {
@@ -236,39 +305,41 @@ export function normalizePicks(
       continue;
     }
 
-    cashFit.push({ ...pick, qty, allocationInr });
+    sized.push({
+      ...pick,
+      qty,
+      allocationInr,
+      investRatioPct: roundMoney(pick.investRatioPct),
+    });
     allocated = roundMoney(allocated + allocationInr);
-    sectorCounts.set(sector, sectorCount + 1);
   }
 
-  if (config.fullCashDeploy && cashFit.length > 0) {
-    deployRemainingCash(cashFit, availableCash, maxAlloc, config);
+  if (config.fullCashDeploy && sized.length > 0) {
+    deployRemainingCash(sized, availableCash, maxAlloc, config);
     allocated = roundMoney(
-      cashFit.reduce((sum, p) => sum + p.allocationInr, 0),
+      sized.reduce((sum, p) => sum + p.allocationInr, 0),
     );
     const leftover = roundMoney(availableCash - allocated);
     const leftoverLimit = Math.max(
       config.maxCashLeftoverInr,
       roundMoney(availableCash * config.maxCashLeftoverPct),
     );
+    // Refresh ratios from final allocations for transparency.
+    for (const p of sized) {
+      p.investRatioPct = roundMoney((p.allocationInr / availableCash) * 100);
+    }
     if (leftover > leftoverLimit) {
       logger.warn(
-        `Full-cash deploy still left ₹${leftover} idle (limit ₹${leftoverLimit}). Need more names or higher maxAlloc — picks=${cashFit.length}`,
+        `Full-cash deploy still left ₹${leftover} idle (limit ₹${leftoverLimit}). Need more names or higher maxAlloc — picks=${sized.length}`,
       );
     } else {
       logger.log(
-        `Full-cash deploy: allocated=₹${allocated} leftover=₹${leftover} picks=${cashFit.length}`,
+        `Ratio deploy: allocated=₹${allocated} leftover=₹${leftover} picks=${sized.length}`,
       );
     }
   }
 
-  return {
-    picks: cashFit.map((pick, index) => ({
-      ...pick,
-      convictionRank: index + 1,
-    })),
-    rejected,
-  };
+  return sized;
 }
 
 /**

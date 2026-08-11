@@ -5,6 +5,7 @@ import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { User } from '../auth/entities/user.entity';
 import {
   Account,
+  ActivityLog,
   ExecutionSession,
   MarketBhavDaily,
   RecommendationItem,
@@ -19,6 +20,7 @@ import { AddRefreshTokens1754600000000 } from './migrations/1754600000000-AddRef
 import { AddSchedulerRuns1754700000000 } from './migrations/1754700000000-AddSchedulerRuns';
 import { AddAccountUserId1754800000000 } from './migrations/1754800000000-AddAccountUserId';
 import { AllowMultipleTradesPerItem1754900000000 } from './migrations/1754900000000-AllowMultipleTradesPerItem';
+import { AddActivityLogs1755000000000 } from './migrations/1755000000000-AddActivityLogs';
 import { AddUniverseAndBhav1754500000000 } from './migrations/1754500000000-AddUniverseAndBhav';
 import { CreateUsers1754040000000 } from './migrations/1754040000000-CreateUsers';
 import { InitSchema1753470000000 } from './migrations/1753470000000-InitSchema';
@@ -38,6 +40,7 @@ import { InitSchema1753470000000 } from './migrations/1753470000000-InitSchema';
         autoLoadEntities: true,
         entities: [
           Account,
+          ActivityLog,
           RecommendationRun,
           RecommendationItem,
           ExecutionSession,
@@ -60,11 +63,13 @@ import { InitSchema1753470000000 } from './migrations/1753470000000-InitSchema';
           AddSchedulerRuns1754700000000,
           AddAccountUserId1754800000000,
           AllowMultipleTradesPerItem1754900000000,
+          AddActivityLogs1755000000000,
         ],
       }),
     }),
     TypeOrmModule.forFeature([
       Account,
+      ActivityLog,
       RecommendationRun,
       RecommendationItem,
       ExecutionSession,

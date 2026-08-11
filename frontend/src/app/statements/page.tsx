@@ -2,6 +2,7 @@
 
 import { CashSummary } from "@/components/CashSummary";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
+import { LogsPanel } from "@/components/LogsPanel";
 import { OverviewPanel } from "@/components/OverviewPanel";
 import { PortfolioPanel } from "@/components/PortfolioPanel";
 import { RecommendationsPanel } from "@/components/RecommendationsPanel";
@@ -32,6 +33,7 @@ type TabId =
   | "recommendations"
   | "execution"
   | "statements"
+  | "logs"
   | "settings";
 
 function DashboardContent() {
@@ -157,6 +159,7 @@ function DashboardContent() {
           { id: "recommendations", label: "Recommendations" },
           { id: "execution", label: "Execution" },
           { id: "statements", label: "Statements" },
+          { id: "logs", label: "Logs" },
           { id: "settings", label: "Settings" },
         ]}
         active={tab}
@@ -224,6 +227,13 @@ function DashboardContent() {
             loading={statementsLoading}
             error={statementsError}
           />
+        </TabPanel>
+        <TabPanel
+          id="logs"
+          active={tab}
+          keepMounted={visitedTabs.has("logs")}
+        >
+          <LogsPanel accessToken={accessToken} />
         </TabPanel>
         <TabPanel
           id="settings"

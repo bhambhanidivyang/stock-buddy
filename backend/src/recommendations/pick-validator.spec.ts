@@ -52,12 +52,14 @@ describe('normalizePicks', () => {
     allocationInr: number,
     mid = 180,
     convictionRank = 1,
+    investRatioPct = 100,
   ) {
     const lvl = levels(mid);
     return {
       symbol,
       qty: Math.floor(allocationInr / mid),
       allocationInr,
+      investRatioPct,
       buyLow: lvl.buyLow,
       buyHigh: lvl.buyHigh,
       sellTarget: lvl.sellTarget,
@@ -83,14 +85,18 @@ describe('normalizePicks', () => {
   });
 
   it('drops names below min %', () => {
+    // Single-name ratios are renormalized to 100%; keep a tiny sleeve next to a large one.
     const { picks, rejected } = normalizePicks(
-      [basePick('ITC', 5_000, 450)],
+      [
+        basePick('GAIL', 90_000, 180, 1, 97),
+        basePick('ITC', 5_000, 450, 2, 3),
+      ],
       cash,
       allowed,
       quotes,
       { config, levelsBySymbol },
     );
-    expect(picks).toHaveLength(0);
+    expect(picks.every((p) => p.symbol !== 'ITC')).toBe(true);
     expect(rejected.some((r) => r.symbol === 'ITC')).toBe(true);
   });
 
@@ -161,9 +167,9 @@ describe('normalizePicks', () => {
     ]);
     const { picks } = normalizePicks(
       [
-        basePick('GAIL', 12_000, 180, 1),
-        basePick('TATASTEEL', 12_000, 150, 2),
-        basePick('ITC', 12_000, 450, 3),
+        basePick('GAIL', 12_000, 180, 1, 34),
+        basePick('TATASTEEL', 12_000, 150, 2, 33),
+        basePick('ITC', 12_000, 450, 3, 33),
       ],
       cash,
       allowed,

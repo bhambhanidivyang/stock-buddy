@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
+import { ActivityLogsService } from '../activity-logs/activity-logs.service';
 import {
   moneyString,
   priceString,
@@ -48,6 +49,7 @@ export class ExecutionLoopService implements OnModuleDestroy {
   constructor(
     private readonly config: ConfigService,
     private readonly yahoo: YahooService,
+    private readonly activityLogs: ActivityLogsService,
     private readonly dataSource: DataSource,
     @InjectRepository(ExecutionSession)
     private readonly sessions: Repository<ExecutionSession>,
@@ -388,6 +390,15 @@ export class ExecutionLoopService implements OnModuleDestroy {
     if (this.activeSessionIds.has(fresh.id)) {
       this.stop(fresh.id);
     }
+
+    await this.activityLogs.append({
+      accountId: fresh.accountId,
+      category: 'EXECUTION',
+      eventCode: 'EXEC_END',
+      message: `Execution run ends (end of day) at ${(fresh.stoppedAt ?? new Date()).toISOString()}`,
+      refId: fresh.id,
+      meta: { stopReason: ExecutionStopReason.END_OF_DAY },
+    });
   }
 
   private istDayKey(now = new Date()): string {
@@ -400,6 +411,16 @@ export class ExecutionLoopService implements OnModuleDestroy {
   }
 
   private async fillBuy(tradeId: string, price: number) {
+    type Fill = {
+      accountId: string;
+      sessionId: string;
+      symbol: string;
+      qty: number;
+      price: number;
+      cost: number;
+    };
+    const filled: { value: Fill | null } = { value: null };
+
     await this.dataSource.transaction(async (manager) => {
       const trade = await manager.findOne(Trade, {
         where: { id: tradeId },
@@ -434,10 +455,30 @@ export class ExecutionLoopService implements OnModuleDestroy {
 
       await manager.save(account);
       await manager.save(trade);
+      filled.value = {
+        accountId: trade.accountId,
+        sessionId: trade.executionSessionId,
+        symbol: trade.symbol,
+        qty: trade.qty,
+        price,
+        cost,
+      };
       this.logger.log(
         `BUY ${trade.symbol} qty=${trade.qty} @ ${price} cost=${cost}`,
       );
     });
+
+    if (filled.value) {
+      const f = filled.value;
+      await this.activityLogs.append({
+        accountId: f.accountId,
+        category: 'EXECUTION',
+        eventCode: 'EXEC_BOUGHT',
+        message: `Bought: ${f.symbol} qty=${f.qty} @ ${f.price}`,
+        refId: f.sessionId,
+        meta: f,
+      });
+    }
   }
 
   private async fillSell(
@@ -445,6 +486,17 @@ export class ExecutionLoopService implements OnModuleDestroy {
     price: number,
     reason: TradeExitReason,
   ) {
+    type Fill = {
+      accountId: string;
+      sessionId: string;
+      symbol: string;
+      qty: number;
+      price: number;
+      reason: TradeExitReason;
+      pnl: number;
+    };
+    const filled: { value: Fill | null } = { value: null };
+
     await this.dataSource.transaction(async (manager) => {
       const trade = await manager.findOne(Trade, {
         where: { id: tradeId },
@@ -478,10 +530,31 @@ export class ExecutionLoopService implements OnModuleDestroy {
 
       await manager.save(account);
       await manager.save(trade);
+      filled.value = {
+        accountId: trade.accountId,
+        sessionId: trade.executionSessionId,
+        symbol: trade.symbol,
+        qty: trade.qty,
+        price,
+        reason,
+        pnl,
+      };
       this.logger.log(
         `SELL ${trade.symbol} qty=${trade.qty} @ ${price} reason=${reason} pnl=${pnl}`,
       );
     });
+
+    if (filled.value) {
+      const f = filled.value;
+      await this.activityLogs.append({
+        accountId: f.accountId,
+        category: 'EXECUTION',
+        eventCode: 'EXEC_SOLD',
+        message: `Sold: ${f.symbol} qty=${f.qty} @ ${f.price} (${f.reason}, P&L ₹${f.pnl})`,
+        refId: f.sessionId,
+        meta: f,
+      });
+    }
   }
 
   private async maybeCompleteSession(session: ExecutionSession) {
@@ -525,5 +598,14 @@ export class ExecutionLoopService implements OnModuleDestroy {
       this.stop(fresh.id);
     }
     this.logger.log(`Execution session ${fresh.id} completed`);
+
+    await this.activityLogs.append({
+      accountId: fresh.accountId,
+      category: 'EXECUTION',
+      eventCode: 'EXEC_END',
+      message: `Execution run ends (all closed) at ${(fresh.stoppedAt ?? new Date()).toISOString()}`,
+      refId: fresh.id,
+      meta: { stopReason: ExecutionStopReason.ALL_CLOSED },
+    });
   }
 }

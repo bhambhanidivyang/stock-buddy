@@ -57,6 +57,7 @@ export const RECOMMENDATION_RESPONSE_JSON_SCHEMA = {
           'symbol',
           'qty',
           'allocationInr',
+          'investRatioPct',
           'buyLow',
           'buyHigh',
           'sellTarget',
@@ -69,6 +70,8 @@ export const RECOMMENDATION_RESPONSE_JSON_SCHEMA = {
           symbol: { type: 'string' },
           qty: { type: 'number' },
           allocationInr: { type: 'number' },
+          /** Share of deployable cash for this pick (percent). All picks must sum ≈ 100. */
+          investRatioPct: { type: 'number' },
           buyLow: { type: 'number' },
           buyHigh: { type: 'number' },
           sellTarget: { type: 'number' },
@@ -107,6 +110,8 @@ export interface AiRecommendationPick {
   symbol: string;
   qty: number;
   allocationInr: number;
+  /** Percent of deployable cash (all picks should sum ~100). */
+  investRatioPct: number;
   buyLow: number;
   buyHigh: number;
   sellTarget: number;

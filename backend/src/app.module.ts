@@ -13,6 +13,7 @@ import { RecommendationsModule } from './recommendations/recommendations.module'
 import { AuthModule } from './auth/auth.module';
 import { JobsModule } from './jobs/jobs.module';
 import { StatementModule } from './statement/statement.module';
+import { ActivityLogsModule } from './activity-logs/activity-logs.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { StatementModule } from './statement/statement.module';
     AuthModule,
     StatementModule,
     JobsModule,
+    ActivityLogsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

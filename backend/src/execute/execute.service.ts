@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { And, DataSource, In, LessThan, MoreThanOrEqual, Repository } from 'typeorm';
 import { AccountService } from '../account/account.service';
+import { ActivityLogsService } from '../activity-logs/activity-logs.service';
 import { toNumber } from '../common/money';
 import {
   ExecutionSession,
@@ -32,6 +33,7 @@ export class ExecuteService implements OnModuleInit {
 
   constructor(
     private readonly accounts: AccountService,
+    private readonly activityLogs: ActivityLogsService,
     private readonly loop: ExecutionLoopService,
     private readonly yahoo: YahooService,
     private readonly dataSource: DataSource,
@@ -231,6 +233,42 @@ export class ExecuteService implements OnModuleInit {
     this.logger.log(
       `Started execution session ${result.session.id} for recommendation ${run.id} trades=${result.createdTrades.length} addOns=${result.addOnSymbols.join(',') || 'none'}`,
     );
+
+    const startedAt = result.session.startedAt ?? new Date();
+    await this.activityLogs.append({
+      accountId: account.id,
+      category: 'EXECUTION',
+      eventCode: 'EXEC_START',
+      message: `Execution run start at ${startedAt.toISOString()} (session=${result.session.id}, recommendation=${run.id}, trades=${result.createdTrades.length})`,
+      refId: result.session.id,
+      meta: {
+        recommendationId: run.id,
+        tradeCount: result.createdTrades.length,
+        addOnSymbols: result.addOnSymbols,
+      },
+    });
+
+    const waitingLines = result.createdTrades.map(
+      (t) =>
+        `${t.symbol} buy ${t.buyLow}–${t.buyHigh}, SL ${t.stopLoss}, target ${t.sellTarget}`,
+    );
+    await this.activityLogs.append({
+      accountId: account.id,
+      category: 'EXECUTION',
+      eventCode: 'EXEC_WAITING_BUY',
+      message: `Waiting Buy — ${waitingLines.join(' | ') || '—'}`,
+      refId: result.session.id,
+      meta: {
+        trades: result.createdTrades.map((t) => ({
+          symbol: t.symbol,
+          buyLow: t.buyLow,
+          buyHigh: t.buyHigh,
+          stopLoss: t.stopLoss,
+          sellTarget: t.sellTarget,
+          qty: t.qty,
+        })),
+      },
+    });
 
     return {
       sessionId: result.session.id,
@@ -667,6 +705,15 @@ export class ExecuteService implements OnModuleInit {
         { id: session.recommendationRunId },
         { status: RecommendationRunStatus.SUPERSEDED },
       );
+    });
+
+    await this.activityLogs.append({
+      accountId: account.id,
+      category: 'EXECUTION',
+      eventCode: 'EXEC_END',
+      message: `Execution run ends (manual stop) at ${(session.stoppedAt ?? new Date()).toISOString()}`,
+      refId: session.id,
+      meta: { stopReason: ExecutionStopReason.MANUAL },
     });
 
     const openLeft = await this.trades.count({

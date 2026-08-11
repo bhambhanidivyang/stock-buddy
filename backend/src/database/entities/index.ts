@@ -1,4 +1,5 @@
 export { Account } from './account.entity';
+export { ActivityLog } from './activity-log.entity';
 export { ExecutionSession } from './execution-session.entity';
 export { MarketBhavDaily } from './market-bhav-daily.entity';
 export { RecommendationItem } from './recommendation-item.entity';

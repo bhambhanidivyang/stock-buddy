@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountModule } from '../account/account.module';
+import { ActivityLogsModule } from '../activity-logs/activity-logs.module';
 import {
   Account,
   ExecutionSession,
@@ -16,6 +17,7 @@ import { ExecutionLoopService } from './execution-loop.service';
 @Module({
   imports: [
     AccountModule,
+    ActivityLogsModule,
     MarketModule,
     TypeOrmModule.forFeature([
       Account,
@@ -27,6 +29,6 @@ import { ExecutionLoopService } from './execution-loop.service';
   ],
   controllers: [ExecuteController],
   providers: [ExecuteService, ExecutionLoopService],
-  exports: [ExecuteService],
+  exports: [ExecuteService, ExecutionLoopService],
 })
 export class ExecuteModule {}

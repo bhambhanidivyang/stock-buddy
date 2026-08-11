@@ -9,6 +9,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { And, In, LessThan, MoreThanOrEqual, Repository } from 'typeorm';
 import { AccountService } from '../account/account.service';
+import { ActivityLogsService } from '../activity-logs/activity-logs.service';
 import { OpenAiService } from '../ai/openai.service';
 import { loadRecommendationConfig } from '../config/recommendation.config';
 import { moneyString, priceString, roundMoney, toNumber } from '../common/money';
@@ -47,6 +48,7 @@ export class RecommendationsService {
     private readonly openai: OpenAiService,
     private readonly features: MarketFeatureEngine,
     private readonly holdings: ManageHoldingsService,
+    private readonly activityLogs: ActivityLogsService,
     @InjectRepository(RecommendationRun)
     private readonly runs: Repository<RecommendationRun>,
     @InjectRepository(RecommendationItem)
@@ -158,6 +160,12 @@ export class RecommendationsService {
     this.logger.log(
       `Recommendation start user=${userId.slice(0, 8)}… session=${marketSession} cash=${availableCash} mode=${config.ranking.shortlistMode}`,
     );
+    await this.activityLogs.append({
+      accountId: account.id,
+      category: 'RECOMMENDATION',
+      eventCode: 'REC_START',
+      message: `Recommendation run start at ${marketTs.toISOString()} (session=${marketSession}, cash=₹${availableCash.toLocaleString('en-IN')})`,
+    });
 
     await this.assertUnderDailyLimit(account.id, config.maxRecommendationsPerDay);
 
@@ -174,6 +182,44 @@ export class RecommendationsService {
     this.logger.log(
       `Recommendation stage: board ready in ${Date.now() - startedMs}ms · openLots=${openTrades.length}`,
     );
+    const funnel = board.pipelineFunnel;
+    await this.activityLogs.append({
+      accountId: account.id,
+      category: 'RECOMMENDATION',
+      eventCode: 'REC_UNIVERSE',
+      message: `Universe created: ${funnel.universe} symbols (${funnel.universeProvider ?? 'nse'})`,
+      meta: { universe: funnel.universe },
+    });
+    const illiquidFiltered =
+      (funnel.liquidRejected ?? Math.max(0, funnel.universe - (funnel.liquidEligible ?? 0)));
+    await this.activityLogs.append({
+      accountId: account.id,
+      category: 'RECOMMENDATION',
+      eventCode: 'REC_LIQUID_FILTER',
+      message: `Filtered ${illiquidFiltered} illiquid stocks → liquid ${funnel.liquidEligible ?? 0}`,
+      meta: { illiquidFiltered, liquid: funnel.liquidEligible },
+    });
+    await this.activityLogs.append({
+      accountId: account.id,
+      category: 'RECOMMENDATION',
+      eventCode: 'REC_QUOTE_POOL',
+      message: `Filtered to research/priority pool ${
+        funnel.researchPool ?? funnel.prioritized ?? funnel.quotesOk
+      } (quotes ok ${funnel.quotesOk}, failed ${funnel.quotesFailed})`,
+      meta: {
+        quotesOk: funnel.quotesOk,
+        quotesFailed: funnel.quotesFailed,
+        prioritized: funnel.prioritized,
+        researchPool: funnel.researchPool,
+      },
+    });
+    await this.activityLogs.append({
+      accountId: account.id,
+      category: 'RECOMMENDATION',
+      eventCode: 'REC_TOP40',
+      message: `Filtered to Top ${board.priorityShortlist.length}: ${board.priorityShortlist.map((c) => c.symbol).join(', ') || '—'}`,
+      meta: { symbols: board.priorityShortlist.map((c) => c.symbol) },
+    });
 
     // Manage OPEN lots first (code-owned levels). AI then sees updated exits.
     this.logger.log('Recommendation stage: managing open holdings…');
@@ -264,6 +310,14 @@ export class RecommendationsService {
       this.logger.log(
         `Recommendation stage: calling AI with ${aiCandidates.length} candidate(s)…`,
       );
+      const sentNames = aiCandidates.map((c: { symbol: string }) => c.symbol);
+      await this.activityLogs.append({
+        accountId: account.id,
+        category: 'RECOMMENDATION',
+        eventCode: 'REC_SENT_AI',
+        message: `Sent to AI — ${sentNames.length}: ${sentNames.join(', ') || '—'}`,
+        meta: { symbols: sentNames },
+      });
       const aiStartedMs = Date.now();
       const plan = await this.openai.createRecommendationPlan({
         marketTs: marketTs.toISOString(),
@@ -283,6 +337,23 @@ export class RecommendationsService {
       this.logger.log(
         `Recommendation stage: AI done in ${Date.now() - aiStartedMs}ms model=${model} picks=${response.picks?.length ?? 0}`,
       );
+      const aiPickLines = (response.picks ?? []).map(
+        (p) =>
+          `${p.symbol} (${p.investRatioPct ?? '?'}%: ${p.summary?.trim() || 'selected'})`,
+      );
+      await this.activityLogs.append({
+        accountId: account.id,
+        category: 'RECOMMENDATION',
+        eventCode: 'REC_AI_PROPOSED',
+        message: `Proposed by AI — ${response.picks?.length ?? 0}: ${aiPickLines.join(' | ') || '—'}`,
+        meta: {
+          picks: (response.picks ?? []).map((p) => ({
+            symbol: p.symbol,
+            investRatioPct: p.investRatioPct ?? null,
+            summary: p.summary,
+          })),
+        },
+      });
     } else {
       this.logger.log(
         `Recommendation stage: skip AI (cash ₹${availableCash} < min ₹${config.minDeployCashInr})`,
@@ -292,6 +363,20 @@ export class RecommendationsService {
         board.pipelineFunnel.summary.replace(/→ AI \d+/, '→ AI 0'),
         `cash dust < ₹${config.minDeployCashInr}`,
       ].join(' · ');
+      await this.activityLogs.append({
+        accountId: account.id,
+        category: 'RECOMMENDATION',
+        eventCode: 'REC_SENT_AI',
+        message: `Sent to AI — 0 (skipped: cash ₹${availableCash.toLocaleString('en-IN')} < min ₹${config.minDeployCashInr.toLocaleString('en-IN')})`,
+        meta: { symbols: [], skipped: true },
+      });
+      await this.activityLogs.append({
+        accountId: account.id,
+        category: 'RECOMMENDATION',
+        eventCode: 'REC_AI_PROPOSED',
+        message: 'Proposed by AI — 0: —',
+        meta: { picks: [] },
+      });
     }
 
     // Belt: overwrite AI prices with suggestedLevels before validation
@@ -327,6 +412,21 @@ export class RecommendationsService {
       quotesBySymbol,
       { config, levelsBySymbol },
     );
+
+    await this.activityLogs.append({
+      accountId: account.id,
+      category: 'RECOMMENDATION',
+      eventCode: 'REC_VALIDATED',
+      message: `Validated: kept ${picks.length} [${picks.map((p) => p.symbol).join(', ') || '—'}] · removed ${validatorRejected.length}${
+        validatorRejected.length
+          ? ` [${validatorRejected.map((r) => `${r.symbol}: ${r.reason}`).join(' | ')}]`
+          : ''
+      }`,
+      meta: {
+        kept: picks.map((p) => p.symbol),
+        removed: validatorRejected,
+      },
+    });
 
     const totalAllocated = roundMoney(
       picks.reduce((sum, pick) => sum + pick.allocationInr, 0),
@@ -476,6 +576,14 @@ export class RecommendationsService {
     this.logger.log(
       `Recommendation ${savedRun.id}: ${pipelineFunnel.summary} | allocated=${totalAllocated} reserved=${cashReserved} | holdingsUpdated=${holdingsManagement.filter((h) => h.changed).length} | total=${Date.now() - startedMs}ms`,
     );
+    await this.activityLogs.append({
+      accountId: account.id,
+      category: 'RECOMMENDATION',
+      eventCode: 'REC_END',
+      message: `Recommendation run ends (${savedRun.id}) · allocated ₹${totalAllocated.toLocaleString('en-IN')} · ${Date.now() - startedMs}ms`,
+      refId: savedRun.id,
+      meta: { allocated: totalAllocated, reserved: cashReserved },
+    });
 
     const fresh = await this.runs.findOne({
       where: { id: savedRun.id },
