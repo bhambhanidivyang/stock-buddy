@@ -168,16 +168,16 @@ export function ExecutionPanel({ accessToken, status, onStatus }: Props) {
               accent={status.needsReviewPositions > 0 ? "rose" : "neutral"}
             />
             <Stat
-              label="Unrealized"
+              label="Open MTM"
               value={formatInr(status.unrealizedPnlOpen ?? 0)}
-              hint="Mark − buy on held"
+              hint="Mark − buy on held (not P&L)"
               accent="neutral"
               valueClass={pnlClass(status.unrealizedPnlOpen ?? 0)}
             />
             <Stat
-              label="Realized today"
+              label="P&L today"
               value={formatInr(status.realizedPnlToday ?? 0)}
-              hint="From sold lots"
+              hint="Realized from sold lots"
               accent="neutral"
               valueClass={pnlClass(status.realizedPnlToday ?? 0)}
             />
@@ -240,9 +240,9 @@ export function ExecutionPanel({ accessToken, status, onStatus }: Props) {
                     <th className="px-3 py-3 font-semibold">Mark</th>
                     <th className="px-3 py-3 font-semibold">Sold @</th>
                     <th className="px-3 py-3 font-semibold">Tgt / SL</th>
-                    <th className="px-3 py-3 font-semibold">Unrealized</th>
+                    <th className="px-3 py-3 font-semibold">Open MTM</th>
                     <th className="px-3 py-3 font-semibold sm:px-4">
-                      Realized
+                      P&amp;L
                     </th>
                   </tr>
                 </thead>
@@ -311,7 +311,7 @@ export function ExecutionPanel({ accessToken, status, onStatus }: Props) {
                             : ""}
                           {" · "}
                           <span className={pnlClass(session.realizedPnl)}>
-                            Realized {formatInr(session.realizedPnl)}
+                            P&amp;L {formatInr(session.realizedPnl)}
                           </span>
                         </p>
                       </div>
@@ -473,7 +473,7 @@ function HistoryLotsTable({ legs }: { legs: ExecutionHistoryLeg[] }) {
             <th className="px-3 py-2 font-semibold">Buy @</th>
             <th className="px-3 py-2 font-semibold">Sold @</th>
             <th className="px-3 py-2 font-semibold">Reason</th>
-            <th className="px-3 py-2 font-semibold">Realized</th>
+            <th className="px-3 py-2 font-semibold">P&amp;L</th>
           </tr>
         </thead>
         <tbody>

@@ -182,7 +182,7 @@ export function PortfolioPanel({
             <p className="mt-1 text-sm text-stone-600">
               {holdings.length === 0
                 ? "No open or review lots."
-                : `Invested ${formatInr(portfolio?.totals.invested ?? 0)} · MTM ${formatInr(portfolio?.totals.marketValue ?? 0)} · P&L `}
+                : `Invested ${formatInr(portfolio?.totals.invested ?? 0)} · MTM ${formatInr(portfolio?.totals.marketValue ?? 0)} · Open MTM `}
               {holdings.length > 0 ? (
                 <span className={pnlClass(portfolio?.totals.unrealizedPnl ?? 0)}>
                   {formatInr(portfolio?.totals.unrealizedPnl ?? 0)}
@@ -276,7 +276,7 @@ function HoldingsTable({
             <th className="px-4 py-3 font-medium">Buy / Mark</th>
             <th className="px-4 py-3 font-medium">Target / Stop</th>
             <th className="px-4 py-3 font-medium">MTM</th>
-            <th className="px-4 py-3 font-medium">Unrealized</th>
+            <th className="px-4 py-3 font-medium">Open MTM</th>
             <th className="px-4 py-3 font-medium">Actions</th>
           </tr>
         </thead>

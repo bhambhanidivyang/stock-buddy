@@ -20,19 +20,24 @@ export function CashSummary({ balance, loading, onOpenReview }: Props) {
 
   if (!balance) return null;
 
-  const totalPnl = balance.realizedPnl + balance.unrealizedPnl;
   const vsSeed = balance.equity - balance.initialFund;
 
   return (
-    <div className="mb-6 grid gap-3 rounded-xl border border-stone-200 bg-white/80 p-4 shadow-sm sm:grid-cols-2 lg:grid-cols-5">
+    <div className="mb-6 grid gap-3 rounded-xl border border-stone-200 bg-white/80 p-4 shadow-sm sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
       <Metric label="Cash" value={formatInr(balance.cash)} />
       <Metric label="Holdings (MTM)" value={formatInr(balance.holdingsValue)} />
       <Metric label="Equity" value={formatInr(balance.equity)} />
       <Metric
-        label="P&L (realized + open)"
-        value={formatInr(totalPnl)}
-        valueClass={pnlClass(totalPnl)}
-        hint={`Realized ${formatInr(balance.realizedPnl)} · Unrealized ${formatInr(balance.unrealizedPnl)}`}
+        label="P&L"
+        value={formatInr(balance.realizedPnl)}
+        valueClass={pnlClass(balance.realizedPnl)}
+        hint="Realized only (closed trades)"
+      />
+      <Metric
+        label="Open MTM"
+        value={formatInr(balance.unrealizedPnl)}
+        valueClass={pnlClass(balance.unrealizedPnl)}
+        hint="Mark − buy on open lots (not P&L)"
       />
       <div className="flex flex-col justify-center gap-1">
         <p className="text-xs font-medium uppercase tracking-wide text-stone-500">
@@ -79,7 +84,9 @@ function Metric({
       <p className="text-xs font-medium uppercase tracking-wide text-stone-500">
         {label}
       </p>
-      <p className={`mt-1 text-lg font-semibold tabular-nums text-stone-900 ${valueClass ?? ""}`}>
+      <p
+        className={`mt-1 text-lg font-semibold tabular-nums text-stone-900 ${valueClass ?? ""}`}
+      >
         {value}
       </p>
       {hint ? <p className="mt-0.5 text-xs text-stone-500">{hint}</p> : null}

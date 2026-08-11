@@ -63,7 +63,7 @@ export function OverviewPanel({
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card
           title="Lifetime Equity"
           body={formatInr(balance.equity)}
@@ -71,9 +71,15 @@ export function OverviewPanel({
         />
         <Card
           title="P&L"
-          body={formatInr(balance.realizedPnl + balance.unrealizedPnl)}
-          bodyClass={pnlClass(balance.realizedPnl + balance.unrealizedPnl)}
-          sub={`Realized ${formatInr(balance.realizedPnl)} · Mark ${formatInr(balance.unrealizedPnl)}`}
+          body={formatInr(balance.realizedPnl)}
+          bodyClass={pnlClass(balance.realizedPnl)}
+          sub="Realized only — closed trades"
+        />
+        <Card
+          title="Open MTM"
+          body={formatInr(balance.unrealizedPnl)}
+          bodyClass={pnlClass(balance.unrealizedPnl)}
+          sub="Mark − buy on open lots (not locked P&L)"
         />
         <Card title="Execution" body={execution.body} sub={execution.sub} />
       </div>
