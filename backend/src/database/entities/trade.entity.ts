@@ -9,6 +9,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import {
+  ManagementPhase,
   RecommendationItemRole,
   TradeExitReason,
   TradeStatus,
@@ -132,6 +133,54 @@ export class Trade {
     nullable: true,
   })
   realizedPnl: string | null;
+
+  /** Live management phase while OPEN. Null until filled. */
+  @Column({ name: 'management_phase', type: 'text', nullable: true })
+  managementPhase: ManagementPhase | null;
+
+  /** Stop at fill — immutable R / thesis reference. */
+  @Column({
+    name: 'initial_stop',
+    type: 'numeric',
+    precision: 12,
+    scale: 4,
+    nullable: true,
+  })
+  initialStop: string | null;
+
+  /** Original plan target at fill — not overwritten by later protection. */
+  @Column({
+    name: 'original_target',
+    type: 'numeric',
+    precision: 12,
+    scale: 4,
+    nullable: true,
+  })
+  originalTarget: string | null;
+
+  @Column({
+    name: 'high_water_mark',
+    type: 'numeric',
+    precision: 12,
+    scale: 4,
+    nullable: true,
+  })
+  highWaterMark: string | null;
+
+  @Column({
+    name: 'max_unrealized_pct',
+    type: 'numeric',
+    precision: 10,
+    scale: 4,
+    nullable: true,
+  })
+  maxUnrealizedPct: string | null;
+
+  @Column({ name: 'last_ai_review_at', type: 'timestamptz', nullable: true })
+  lastAiReviewAt: Date | null;
+
+  @Column({ name: 'last_ai_action', type: 'text', nullable: true })
+  lastAiAction: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

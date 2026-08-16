@@ -1,11 +1,22 @@
 "use client";
 
 import { fetchActivityLogs } from "@/lib/api";
-import type { ActivityLogDay } from "@/lib/types";
-import { useCallback, useEffect, useState } from "react";
+import type { ActivityLogDay, ActivityLogEvent } from "@/lib/types";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Props = {
   accessToken?: string | null;
+};
+
+type AiPositionLine = {
+  symbol: string;
+  action: string;
+  allow: boolean;
+  reason: string;
+  validation: string;
+  confidence: number;
+  ltp: number;
+  pnlPct: number;
 };
 
 function formatDayLabel(dayKey: string): string {
@@ -32,9 +43,26 @@ function formatTime(iso: string): string {
 }
 
 function categoryTone(category: string): string {
-  return category === "EXECUTION"
-    ? "bg-amber-100 text-amber-900"
-    : "bg-teal-100 text-teal-900";
+  if (category === "EXECUTION") return "bg-amber-100 text-amber-900";
+  if (category === "POSITION_MANAGEMENT") return "bg-violet-100 text-violet-900";
+  return "bg-teal-100 text-teal-900";
+}
+
+function categoryLabel(category: string): string {
+  if (category === "EXECUTION") return "Exec";
+  if (category === "POSITION_MANAGEMENT") return "AI";
+  return "Rec";
+}
+
+function positionsFromMeta(meta: Record<string, unknown> | null): AiPositionLine[] {
+  const raw = meta?.positions;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (row): row is AiPositionLine =>
+      typeof row === "object" &&
+      row != null &&
+      typeof (row as AiPositionLine).symbol === "string",
+  );
 }
 
 export function LogsPanel({ accessToken }: Props) {
@@ -42,6 +70,8 @@ export function LogsPanel({ accessToken }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [openDays, setOpenDays] = useState<Set<string>>(() => new Set());
+  const [aiDayKey, setAiDayKey] = useState<string | null>(null);
+  const [expandedReviewId, setExpandedReviewId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -73,6 +103,19 @@ export function LogsPanel({ accessToken }: Props) {
       return next;
     });
   }
+
+  const aiDay = useMemo(
+    () => days.find((d) => d.dayKey === aiDayKey) ?? null,
+    [days, aiDayKey],
+  );
+  const aiReviews = useMemo(
+    () =>
+      (aiDay?.events ?? []).filter(
+        (ev) =>
+          ev.category === "POSITION_MANAGEMENT" && ev.eventCode === "PM_REVIEW",
+      ),
+    [aiDay],
+  );
 
   if (loading) {
     return (
@@ -116,7 +159,7 @@ export function LogsPanel({ accessToken }: Props) {
             Activity logs
           </h2>
           <p className="mt-1 text-sm text-stone-600">
-            Important recommend / execute milestones only (IST days).
+            Recommend / execute milestones. AI reviews are grouped per day.
           </p>
         </div>
         <button
@@ -131,6 +174,14 @@ export function LogsPanel({ accessToken }: Props) {
       <ul className="space-y-2">
         {days.map((day) => {
           const open = openDays.has(day.dayKey);
+          const milestones = day.events.filter(
+            (ev) => ev.category !== "POSITION_MANAGEMENT",
+          );
+          const reviews = day.events.filter(
+            (ev) =>
+              ev.category === "POSITION_MANAGEMENT" &&
+              ev.eventCode === "PM_REVIEW",
+          );
           return (
             <li
               key={day.dayKey}
@@ -146,28 +197,42 @@ export function LogsPanel({ accessToken }: Props) {
                   {formatDayLabel(day.dayKey)}
                 </span>
                 <span className="text-xs text-stone-500">
-                  {day.events.length} event
-                  {day.events.length === 1 ? "" : "s"} · {open ? "Hide" : "Show"}
+                  {milestones.length} milestone
+                  {milestones.length === 1 ? "" : "s"}
+                  {reviews.length > 0
+                    ? ` · ${reviews.length} AI review${reviews.length === 1 ? "" : "s"}`
+                    : ""}{" "}
+                  · {open ? "Hide" : "Show"}
                 </span>
               </button>
               {open ? (
                 <ol className="space-y-2 border-t border-stone-100 px-4 py-3">
-                  {day.events.map((ev) => (
-                    <li key={ev.id} className="flex gap-3 text-sm">
+                  {reviews.length > 0 ? (
+                    <li className="flex gap-3 text-sm">
                       <span className="w-20 shrink-0 tabular-nums text-stone-500">
-                        {formatTime(ev.createdAt)}
+                        —
                       </span>
                       <div className="min-w-0 flex-1">
-                        <span
-                          className={`mr-2 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${categoryTone(ev.category)}`}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setExpandedReviewId(null);
+                            setAiDayKey(day.dayKey);
+                          }}
+                          className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-left text-sm text-violet-950 hover:bg-violet-100"
                         >
-                          {ev.category === "EXECUTION" ? "Exec" : "Rec"}
-                        </span>
-                        <span className="whitespace-pre-wrap break-words text-stone-800">
-                          {ev.message}
-                        </span>
+                          <span className="mr-2 inline-block rounded bg-violet-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+                            AI
+                          </span>
+                          {reviews.length} portfolio review
+                          {reviews.length === 1 ? "" : "s"} this day — open
+                          details
+                        </button>
                       </div>
                     </li>
+                  ) : null}
+                  {milestones.map((ev) => (
+                    <LogRow key={ev.id} ev={ev} />
                   ))}
                 </ol>
               ) : null}
@@ -175,6 +240,111 @@ export function LogsPanel({ accessToken }: Props) {
           );
         })}
       </ul>
+
+      {aiDayKey && aiDay ? (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-stone-900/40 p-4 sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="ai-reviews-title"
+          onClick={() => setAiDayKey(null)}
+        >
+          <div
+            className="max-h-[80vh] w-full max-w-2xl overflow-hidden rounded-xl border border-stone-200 bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-stone-100 px-4 py-3">
+              <div>
+                <h3
+                  id="ai-reviews-title"
+                  className="text-sm font-semibold text-stone-900"
+                >
+                  AI reviews · {formatDayLabel(aiDay.dayKey)}
+                </h3>
+                <p className="text-xs text-stone-500">
+                  One row per portfolio cycle (~every 5 min while positions are
+                  open).
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAiDayKey(null)}
+                className="rounded-lg border border-stone-300 px-2 py-1 text-sm text-stone-700 hover:bg-stone-50"
+              >
+                Close
+              </button>
+            </div>
+            <ol className="max-h-[calc(80vh-4rem)] space-y-2 overflow-y-auto px-4 py-3">
+              {aiReviews.map((ev) => {
+                const positions = positionsFromMeta(ev.meta);
+                const open = expandedReviewId === ev.id;
+                return (
+                  <li
+                    key={ev.id}
+                    className="rounded-lg border border-stone-100 bg-stone-50/80 px-3 py-2 text-sm"
+                  >
+                    <button
+                      type="button"
+                      className="flex w-full items-start gap-3 text-left"
+                      onClick={() =>
+                        setExpandedReviewId(open ? null : ev.id)
+                      }
+                    >
+                      <span className="w-20 shrink-0 tabular-nums text-stone-500">
+                        {formatTime(ev.createdAt)}
+                      </span>
+                      <span className="min-w-0 flex-1 text-stone-800">
+                        {ev.message}
+                      </span>
+                    </button>
+                    {open && positions.length > 0 ? (
+                      <ul className="mt-2 space-y-2 border-t border-stone-200 pt-2">
+                        {positions.map((p) => (
+                          <li
+                            key={`${ev.id}-${p.symbol}`}
+                            className="text-xs text-stone-700"
+                          >
+                            <span className="font-semibold">{p.symbol}</span>{" "}
+                            {p.action}
+                            {p.allow ? "" : " · BLOCKED"} · LTP ₹{p.ltp} ·{" "}
+                            {p.pnlPct.toFixed(2)}%
+                            <p className="mt-0.5 text-stone-600">{p.reason}</p>
+                            {p.validation && p.validation !== p.reason ? (
+                              <p className="text-stone-500">
+                                Validator: {p.validation}
+                              </p>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
+        </div>
+      ) : null}
     </div>
+  );
+}
+
+function LogRow({ ev }: { ev: ActivityLogEvent }) {
+  return (
+    <li className="flex gap-3 text-sm">
+      <span className="w-20 shrink-0 tabular-nums text-stone-500">
+        {formatTime(ev.createdAt)}
+      </span>
+      <div className="min-w-0 flex-1">
+        <span
+          className={`mr-2 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${categoryTone(ev.category)}`}
+        >
+          {categoryLabel(ev.category)}
+        </span>
+        <span className="whitespace-pre-wrap break-words text-stone-800">
+          {ev.message}
+        </span>
+      </div>
+    </li>
   );
 }

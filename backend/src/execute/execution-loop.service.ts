@@ -3,12 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
 import { ActivityLogsService } from '../activity-logs/activity-logs.service';
-import {
-  moneyString,
-  priceString,
-  roundMoney,
-  toNumber,
-} from '../common/money';
+import { toNumber } from '../common/money';
 import {
   Account,
   ExecutionSession,
@@ -18,17 +13,24 @@ import {
 import {
   ExecutionSessionStatus,
   ExecutionStopReason,
+  OrderSource,
   RecommendationRunStatus,
   TradeExitReason,
   TradeStatus,
 } from '../database/enums';
+import { loadLiveConfig } from '../live/live.config';
+import { LiveMarketDataService } from '../live/live-market-data.service';
+import { hardExitReason } from '../live/hard-exit';
+import { validateBuy, validateSell } from '../live/order-safety.validator';
+import type { ExecutionQuote } from '../live/types';
+import { PaperBrokerService } from '../live/paper-broker.service';
+import { PositionManagementService } from '../live/position-management.service';
 import {
   canAcceptNewEntries,
   isForceFlatWindow,
   isMarketOpenForTrading,
   shouldRunEndOfDaySettlement,
 } from '../market/market-clock';
-import { YahooService } from '../market/yahoo.service';
 
 @Injectable()
 export class ExecutionLoopService implements OnModuleDestroy {
@@ -48,7 +50,9 @@ export class ExecutionLoopService implements OnModuleDestroy {
 
   constructor(
     private readonly config: ConfigService,
-    private readonly yahoo: YahooService,
+    private readonly liveData: LiveMarketDataService,
+    private readonly broker: PaperBrokerService,
+    private readonly positionManagement: PositionManagementService,
     private readonly activityLogs: ActivityLogsService,
     private readonly dataSource: DataSource,
     @InjectRepository(ExecutionSession)
@@ -167,6 +171,9 @@ export class ExecutionLoopService implements OnModuleDestroy {
         await this.processEntries(session);
       }
 
+      // Do not await AI: hard stop/target must keep polling even while OpenAI runs.
+      void this.positionManagement.onTick(session.accountId);
+
       if (shouldRunEndOfDaySettlement()) {
         await this.runEndOfDaySettlement(session);
       }
@@ -200,6 +207,7 @@ export class ExecutionLoopService implements OnModuleDestroy {
           continue;
         }
         await this.processExits(accountId);
+        void this.positionManagement.onTick(accountId);
       } catch (error) {
         this.logger.error(
           `Exit watch failed for account ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -219,22 +227,51 @@ export class ExecutionLoopService implements OnModuleDestroy {
       return;
     }
 
-    const quotes = await this.yahoo.getQuotes(waiting.map((t) => t.symbol));
+    const liveConfig = loadLiveConfig();
+    const account = await this.accounts.findOne({
+      where: { id: session.accountId },
+    });
+    const availableCash = account ? toNumber(account.cash) : 0;
+    const quotes = await this.liveData.getExecutionQuotes(
+      waiting.map((t) => t.symbol),
+    );
 
     for (const trade of waiting) {
       if (!this.activeSessionIds.has(session.id)) {
         return;
       }
-      const quote = quotes.get(trade.symbol);
-      if (!quote) {
+      const quote = quotes.get(trade.symbol) ?? null;
+      const safety = validateBuy(
+        {
+          symbol: trade.symbol,
+          qty: trade.qty,
+          buyLow: toNumber(trade.buyLow),
+          buyHigh: toNumber(trade.buyHigh),
+          quote,
+          availableCash,
+          marketOpen: isMarketOpenForTrading() && canAcceptNewEntries(),
+          alreadyOpenQty: 0,
+        },
+        liveConfig,
+      );
+      if (!safety.ok || !quote) {
+        if (safety.code !== 'OUTSIDE_ENTRY_BAND' && safety.code !== 'NO_QUOTE') {
+          this.logger.warn(
+            `BUY blocked ${trade.symbol}: ${safety.reason}`,
+          );
+        }
         continue;
       }
-      const low = toNumber(trade.buyLow);
-      const high = toNumber(trade.buyHigh);
-      if (quote.price < low || quote.price > high) {
-        continue;
+      const filled = await this.broker.buy({
+        tradeId: trade.id,
+        quote,
+        source: OrderSource.OMS,
+      });
+      if (!filled.fill.filled) {
+        this.logger.warn(
+          `BUY not filled ${trade.symbol}: ${filled.fill.rejectReason ?? filled.fill.status}`,
+        );
       }
-      await this.fillBuy(trade.id, quote.price);
     }
   }
 
@@ -246,20 +283,23 @@ export class ExecutionLoopService implements OnModuleDestroy {
       return;
     }
 
-    const quotes = await this.yahoo.getQuotes(openTrades.map((t) => t.symbol));
+    const liveConfig = loadLiveConfig();
+    const quotes = await this.liveData.getExecutionQuotes(
+      openTrades.map((t) => t.symbol),
+    );
 
     for (const trade of openTrades) {
-      const quote = quotes.get(trade.symbol);
+      const quote = quotes.get(trade.symbol) ?? null;
       if (!quote) {
         continue;
       }
       const target = toNumber(trade.sellTarget);
       const stop = toNumber(trade.stopLoss);
-      if (quote.price >= target) {
-        await this.fillSell(trade.id, quote.price, TradeExitReason.TARGET);
-      } else if (quote.price <= stop) {
-        await this.fillSell(trade.id, quote.price, TradeExitReason.STOP);
+      const reason = hardExitReason(quote.price, target, stop);
+      if (!reason) {
+        continue;
       }
+      await this.safeSell(trade, quote, reason, liveConfig);
     }
   }
 
@@ -307,17 +347,32 @@ export class ExecutionLoopService implements OnModuleDestroy {
 
     if (openTrades.length > 0) {
       if (forceFlat) {
-        const quotes = await this.yahoo.getQuotes(
+        const liveConfig = loadLiveConfig();
+        const quotes = await this.liveData.getExecutionQuotes(
           openTrades.map((t) => t.symbol),
         );
         let sold = 0;
         let parked = 0;
         for (const trade of openTrades) {
           const buy = toNumber(trade.buyPrice ?? '0');
-          const mark = quotes.get(trade.symbol)?.price;
-          if (mark != null && mark > buy) {
-            await this.fillSell(trade.id, mark, TradeExitReason.EOD_PROFIT);
-            sold += 1;
+          const quote = quotes.get(trade.symbol) ?? null;
+          const mark = quote?.price;
+          if (mark != null && mark > buy && quote) {
+            const ok = await this.safeSell(
+              trade,
+              quote,
+              TradeExitReason.EOD_PROFIT,
+              liveConfig,
+            );
+            if (ok) {
+              sold += 1;
+            } else {
+              await this.markNeedsReview(
+                trade.id,
+                'EOD force-flat: live sell blocked (stale/unavailable quote)',
+              );
+              parked += 1;
+            }
           } else {
             await this.markNeedsReview(
               trade.id,
@@ -410,151 +465,40 @@ export class ExecutionLoopService implements OnModuleDestroy {
     }).format(now);
   }
 
-  private async fillBuy(tradeId: string, price: number) {
-    type Fill = {
-      accountId: string;
-      sessionId: string;
-      symbol: string;
-      qty: number;
-      price: number;
-      cost: number;
-    };
-    const filled: { value: Fill | null } = { value: null };
-
-    await this.dataSource.transaction(async (manager) => {
-      const trade = await manager.findOne(Trade, {
-        where: { id: tradeId },
-        lock: { mode: 'pessimistic_write' },
-      });
-      if (!trade || trade.status !== TradeStatus.WAITING_BUY) {
-        return;
-      }
-
-      const account = await manager.findOne(Account, {
-        where: { id: trade.accountId },
-        lock: { mode: 'pessimistic_write' },
-      });
-      if (!account) {
-        return;
-      }
-
-      const cost = roundMoney(price * trade.qty);
-      const cash = toNumber(account.cash);
-      if (cash < cost) {
-        this.logger.warn(
-          `Insufficient cash for ${trade.symbol}: need ${cost}, have ${cash}`,
-        );
-        return;
-      }
-
-      account.cash = moneyString(cash - cost);
-      trade.status = TradeStatus.OPEN;
-      trade.buyPrice = priceString(price);
-      trade.buyAt = new Date();
-      trade.investedInr = moneyString(cost);
-
-      await manager.save(account);
-      await manager.save(trade);
-      filled.value = {
-        accountId: trade.accountId,
-        sessionId: trade.executionSessionId,
-        symbol: trade.symbol,
-        qty: trade.qty,
-        price,
-        cost,
-      };
-      this.logger.log(
-        `BUY ${trade.symbol} qty=${trade.qty} @ ${price} cost=${cost}`,
-      );
-    });
-
-    if (filled.value) {
-      const f = filled.value;
-      await this.activityLogs.append({
-        accountId: f.accountId,
-        category: 'EXECUTION',
-        eventCode: 'EXEC_BOUGHT',
-        message: `Bought: ${f.symbol} qty=${f.qty} @ ${f.price}`,
-        refId: f.sessionId,
-        meta: f,
-      });
-    }
-  }
-
-  private async fillSell(
-    tradeId: string,
-    price: number,
+  private async safeSell(
+    trade: Trade,
+    quote: ExecutionQuote,
     reason: TradeExitReason,
-  ) {
-    type Fill = {
-      accountId: string;
-      sessionId: string;
-      symbol: string;
-      qty: number;
-      price: number;
-      reason: TradeExitReason;
-      pnl: number;
-    };
-    const filled: { value: Fill | null } = { value: null };
-
-    await this.dataSource.transaction(async (manager) => {
-      const trade = await manager.findOne(Trade, {
-        where: { id: tradeId },
-        lock: { mode: 'pessimistic_write' },
-      });
-      if (!trade || trade.status !== TradeStatus.OPEN) {
-        return;
-      }
-
-      const account = await manager.findOne(Account, {
-        where: { id: trade.accountId },
-        lock: { mode: 'pessimistic_write' },
-      });
-      if (!account) {
-        return;
-      }
-
-      const proceeds = roundMoney(price * trade.qty);
-      const invested = toNumber(trade.investedInr ?? '0');
-      const pnl = roundMoney(proceeds - invested);
-
-      account.cash = moneyString(toNumber(account.cash) + proceeds);
-      account.realizedPnl = moneyString(toNumber(account.realizedPnl) + pnl);
-
-      trade.status = TradeStatus.CLOSED;
-      trade.exitReason = reason;
-      trade.sellPrice = priceString(price);
-      trade.sellAt = new Date();
-      trade.proceedsInr = moneyString(proceeds);
-      trade.realizedPnl = moneyString(pnl);
-
-      await manager.save(account);
-      await manager.save(trade);
-      filled.value = {
-        accountId: trade.accountId,
-        sessionId: trade.executionSessionId,
+    liveConfig: ReturnType<typeof loadLiveConfig>,
+  ): Promise<boolean> {
+    const safety = validateSell(
+      {
         symbol: trade.symbol,
-        qty: trade.qty,
-        price,
-        reason,
-        pnl,
-      };
-      this.logger.log(
-        `SELL ${trade.symbol} qty=${trade.qty} @ ${price} reason=${reason} pnl=${pnl}`,
-      );
-    });
-
-    if (filled.value) {
-      const f = filled.value;
-      await this.activityLogs.append({
-        accountId: f.accountId,
-        category: 'EXECUTION',
-        eventCode: 'EXEC_SOLD',
-        message: `Sold: ${f.symbol} qty=${f.qty} @ ${f.price} (${f.reason}, P&L ₹${f.pnl})`,
-        refId: f.sessionId,
-        meta: f,
-      });
+        requestedQty: trade.qty,
+        heldQty: trade.qty,
+        status: trade.status,
+        quote,
+        marketOpen: isMarketOpenForTrading(),
+      },
+      liveConfig,
+    );
+    if (!safety.ok) {
+      this.logger.warn(`SELL blocked ${trade.symbol} (${reason}): ${safety.reason}`);
+      return false;
     }
+    const sold = await this.broker.sell({
+      tradeId: trade.id,
+      quote,
+      reason,
+      source: OrderSource.OMS,
+    });
+    if (!sold.fill.filled) {
+      this.logger.warn(
+        `SELL not filled ${trade.symbol}: ${sold.fill.rejectReason ?? sold.fill.status}`,
+      );
+      return false;
+    }
+    return true;
   }
 
   private async maybeCompleteSession(session: ExecutionSession) {

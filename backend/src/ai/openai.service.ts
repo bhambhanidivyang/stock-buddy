@@ -76,17 +76,6 @@ export class OpenAiService {
     promptHash: string;
     userPrompt: string;
   }> {
-    if (this.provider !== 'openai') {
-      throw new ServiceUnavailableException(
-        `AI_PROVIDER=${this.provider} is not supported yet. Set AI_PROVIDER=openai.`,
-      );
-    }
-    if (!this.client) {
-      throw new ServiceUnavailableException(
-        'OPENAI_API_KEY is missing. Set it in .env before calling /recommendations.',
-      );
-    }
-
     const cfg = input.rules ?? loadRecommendationConfig();
     const userPrompt = JSON.stringify(
       {
@@ -108,20 +97,56 @@ export class OpenAiService {
       2,
     );
 
+    return this.completeStructured<AiRecommendationResponse>({
+      schemaName: 'stock_buddy_recommendation',
+      schema: RECOMMENDATION_RESPONSE_JSON_SCHEMA as unknown as Record<
+        string,
+        unknown
+      >,
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt,
+      promptVersion: PROMPT_VERSION,
+    });
+  }
+
+  async completeStructured<T>(input: {
+    schemaName: string;
+    schema: Record<string, unknown>;
+    systemPrompt: string;
+    userPrompt: string;
+    promptVersion: string;
+  }): Promise<{
+    model: string;
+    response: T;
+    aiMetadata: AiPlanMetadata;
+    promptHash: string;
+    userPrompt: string;
+  }> {
+    if (this.provider !== 'openai') {
+      throw new ServiceUnavailableException(
+        `AI_PROVIDER=${this.provider} is not supported yet. Set AI_PROVIDER=openai.`,
+      );
+    }
+    if (!this.client) {
+      throw new ServiceUnavailableException(
+        'OPENAI_API_KEY is missing. Set it in .env before calling AI endpoints.',
+      );
+    }
+
     try {
       const completion = await this.client.chat.completions.create({
         model: this.model,
         response_format: {
           type: 'json_schema',
           json_schema: {
-            name: 'stock_buddy_recommendation',
+            name: input.schemaName,
             strict: true,
-            schema: RECOMMENDATION_RESPONSE_JSON_SCHEMA,
+            schema: input.schema,
           },
         },
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userPrompt },
+          { role: 'system', content: input.systemPrompt },
+          { role: 'user', content: input.userPrompt },
         ],
       });
 
@@ -130,16 +155,16 @@ export class OpenAiService {
         throw new Error('OpenAI returned empty content');
       }
 
-      const parsed = JSON.parse(content) as AiRecommendationResponse;
+      const parsed = JSON.parse(content) as T;
       const usage = completion.usage;
       return {
         model: this.model,
         response: parsed,
-        promptHash: simpleHash(userPrompt),
-        userPrompt,
+        promptHash: simpleHash(input.userPrompt),
+        userPrompt: input.userPrompt,
         aiMetadata: {
           model: this.model,
-          promptVersion: PROMPT_VERSION,
+          promptVersion: input.promptVersion,
           temperature: null,
           tokensPrompt: usage?.prompt_tokens ?? null,
           tokensCompletion: usage?.completion_tokens ?? null,
@@ -149,10 +174,10 @@ export class OpenAiService {
       };
     } catch (error) {
       this.logger.error(
-        `OpenAI recommendation failed: ${error instanceof Error ? error.message : String(error)}`,
+        `OpenAI ${input.schemaName} failed: ${error instanceof Error ? error.message : String(error)}`,
       );
       throw new ServiceUnavailableException(
-        `OpenAI recommendation failed: ${error instanceof Error ? error.message : String(error)}`,
+        `OpenAI ${input.schemaName} failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

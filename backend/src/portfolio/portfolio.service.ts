@@ -4,16 +4,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { AccountService } from '../account/account.service';
-import {
-  moneyString,
-  priceString,
-  roundMoney,
-  toNumber,
-} from '../common/money';
-import { Account, Trade } from '../database/entities';
-import { TradeExitReason, TradeStatus } from '../database/enums';
+import { priceString, roundMoney, toNumber } from '../common/money';
+import { Trade } from '../database/entities';
+import { OrderSource, TradeExitReason, TradeStatus } from '../database/enums';
+import { loadLiveConfig } from '../live/live.config';
+import { LiveMarketDataService } from '../live/live-market-data.service';
+import { validateSell } from '../live/order-safety.validator';
+import { PaperBrokerService } from '../live/paper-broker.service';
 import { isMarketOpenForTrading } from '../market/market-clock';
 import { YahooService } from '../market/yahoo.service';
 import {
@@ -31,7 +30,8 @@ export class PortfolioService {
   constructor(
     private readonly accounts: AccountService,
     private readonly yahoo: YahooService,
-    private readonly dataSource: DataSource,
+    private readonly liveData: LiveMarketDataService,
+    private readonly broker: PaperBrokerService,
     @InjectRepository(Trade)
     private readonly trades: Repository<Trade>,
   ) {}
@@ -199,135 +199,65 @@ export class PortfolioService {
 
   private async sellTrade(trade: Trade, dto: ReviewTradeDto) {
     this.applyRetarget(trade, dto, false);
-
-    if (!isMarketOpenForTrading()) {
-      throw new BadRequestException(
-        'Paper sell requires NSE regular session (09:15–15:30 IST)',
-      );
+    if (dto.sellTarget != null && dto.stopLoss != null) {
+      await this.trades.save(trade);
     }
 
     const sellQty = dto.qty ?? trade.qty;
-    if (!Number.isInteger(sellQty) || sellQty < 1 || sellQty > trade.qty) {
+    const quote = await this.liveData.getExecutionQuote(trade.symbol);
+    const liveConfig = loadLiveConfig();
+    const safety = validateSell(
+      {
+        symbol: trade.symbol,
+        requestedQty: sellQty,
+        heldQty: trade.qty,
+        status: trade.status,
+        quote,
+        marketOpen: isMarketOpenForTrading(),
+      },
+      liveConfig,
+    );
+    if (!safety.ok || !quote) {
       throw new BadRequestException(
-        `qty must be an integer between 1 and ${trade.qty}`,
+        safety.reason || `No live quote for ${trade.symbol}; sell blocked`,
       );
     }
 
-    const quotes = await this.yahoo.getQuotes([trade.symbol]);
-    const mark = quotes.get(trade.symbol)?.price;
-    if (mark == null || !(mark > 0)) {
-      throw new BadRequestException(
-        `No live quote for ${trade.symbol}; cannot paper sell`,
-      );
-    }
-
-    const result = await this.dataSource.transaction(async (manager) => {
-      const locked = await manager.findOne(Trade, {
-        where: { id: trade.id },
-        lock: { mode: 'pessimistic_write' },
-      });
-      if (!locked || !MANAGEABLE.includes(locked.status)) {
-        throw new BadRequestException(
-          'Trade is no longer OPEN or NEEDS_REVIEW',
-        );
-      }
-      if (sellQty > locked.qty) {
-        throw new BadRequestException(
-          `qty ${sellQty} exceeds current lot size ${locked.qty}`,
-        );
-      }
-
-      this.applyRetarget(locked, dto, false);
-
-      const account = await manager.findOne(Account, {
-        where: { id: locked.accountId },
-        lock: { mode: 'pessimistic_write' },
-      });
-      if (!account) {
-        throw new NotFoundException('Account not found');
-      }
-
-      const investedTotal = toNumber(
-        locked.investedInr ?? moneyFallback(toNumber(locked.buyPrice ?? '0'), locked.qty),
-      );
-      const investedSold = roundMoney((investedTotal * sellQty) / locked.qty);
-      const proceeds = roundMoney(mark * sellQty);
-      const pnl = roundMoney(proceeds - investedSold);
-
-      account.cash = moneyString(toNumber(account.cash) + proceeds);
-      account.realizedPnl = moneyString(toNumber(account.realizedPnl) + pnl);
-
-      const remainingQty = locked.qty - sellQty;
-      let remainingTradeId: string | null = null;
-      let closedTradeId: string;
-
-      if (remainingQty === 0) {
-        locked.status = TradeStatus.CLOSED;
-        locked.exitReason = TradeExitReason.HUMAN_SELL;
-        locked.sellPrice = priceString(mark);
-        locked.sellAt = new Date();
-        locked.proceedsInr = moneyString(proceeds);
-        locked.realizedPnl = moneyString(pnl);
-        locked.investedInr = moneyString(investedSold);
-        await manager.save(account);
-        await manager.save(locked);
-        closedTradeId = locked.id;
-      } else {
-        // Closed sibling for the sold slice (statements / history).
-        const closed = manager.create(Trade, {
-          accountId: locked.accountId,
-          recommendationItemId: locked.recommendationItemId,
-          executionSessionId: locked.executionSessionId,
-          symbol: locked.symbol,
-          qty: sellQty,
-          role: locked.role,
-          buyLow: locked.buyLow,
-          buyHigh: locked.buyHigh,
-          sellTarget: locked.sellTarget,
-          stopLoss: locked.stopLoss,
-          summary: locked.summary,
-          status: TradeStatus.CLOSED,
-          exitReason: TradeExitReason.HUMAN_SELL,
-          buyPrice: locked.buyPrice,
-          buyAt: locked.buyAt,
-          sellPrice: priceString(mark),
-          sellAt: new Date(),
-          investedInr: moneyString(investedSold),
-          proceedsInr: moneyString(proceeds),
-          realizedPnl: moneyString(pnl),
-        });
-        const savedClosed = await manager.save(closed);
-        closedTradeId = savedClosed.id;
-
-        locked.qty = remainingQty;
-        locked.investedInr = moneyString(
-          roundMoney(investedTotal - investedSold),
-        );
-        // Keep OPEN if it was OPEN; leave NEEDS_REVIEW as-is for remainder.
-        await manager.save(account);
-        await manager.save(locked);
-        remainingTradeId = locked.id;
-      }
-
-      return {
-        tradeId: closedTradeId,
-        remainingTradeId,
-        symbol: locked.symbol,
-        action: ReviewTradeAction.SELL,
-        status:
-          remainingQty === 0 ? TradeStatus.CLOSED : locked.status,
-        qtySold: sellQty,
-        qtyRemaining: remainingQty,
-        sellPrice: mark,
-        proceeds,
-        realizedPnl: pnl,
-        cash: toNumber(account.cash),
-        sellTarget: toNumber(locked.sellTarget),
-        stopLoss: toNumber(locked.stopLoss),
-      };
+    const sold = await this.broker.sell({
+      tradeId: trade.id,
+      quote,
+      qty: sellQty,
+      reason: TradeExitReason.HUMAN_SELL,
+      source: OrderSource.HUMAN,
     });
+    if (!sold.fill.filled) {
+      throw new BadRequestException(
+        sold.fill.rejectReason ??
+          `Broker did not fill sell (${sold.fill.status})`,
+      );
+    }
 
-    return result;
+    const remaining = sold.remainingTradeId
+      ? await this.trades.findOne({ where: { id: sold.remainingTradeId } })
+      : null;
+    const account = await this.accounts.getAccountById(trade.accountId);
+    const held = remaining ?? trade;
+    return {
+      tradeId: sold.closedTradeId ?? trade.id,
+      remainingTradeId: sold.remainingTradeId,
+      symbol: sold.symbol,
+      action: ReviewTradeAction.SELL,
+      status: sold.qtyRemaining === 0 ? TradeStatus.CLOSED : held.status,
+      qtySold: sold.qtySold,
+      qtyRemaining: sold.qtyRemaining,
+      sellPrice: sold.price,
+      proceeds:
+        sold.price != null ? roundMoney(sold.price * sold.qtySold) : 0,
+      realizedPnl: sold.pnl,
+      cash: toNumber(account.cash),
+      sellTarget: toNumber(held.sellTarget),
+      stopLoss: toNumber(held.stopLoss),
+    };
   }
 }
 

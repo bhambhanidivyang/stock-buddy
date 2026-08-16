@@ -9,7 +9,10 @@ import {
 } from 'typeorm';
 import { Account } from './account.entity';
 
-export type ActivityLogCategory = 'RECOMMENDATION' | 'EXECUTION';
+export type ActivityLogCategory =
+  | 'RECOMMENDATION'
+  | 'EXECUTION'
+  | 'POSITION_MANAGEMENT';
 
 @Entity('activity_logs')
 @Index(['accountId', 'dayKey', 'createdAt'])

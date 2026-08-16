@@ -47,6 +47,38 @@ export enum TradeExitReason {
   EOD_PROFIT = 'EOD_PROFIT',
   /** Human closed a NEEDS_REVIEW lot from the UI / review API. */
   HUMAN_SELL = 'HUMAN_SELL',
+  /** AI position manager recommended EXIT_NOW; backend validated and sold. */
+  AI_EXIT = 'AI_EXIT',
   CANCELLED_SUPERSEDED = 'CANCELLED_SUPERSEDED',
   CANCELLED_EOD = 'CANCELLED_EOD',
+}
+
+/** Intraday management phase while status remains OPEN. */
+export enum ManagementPhase {
+  ENTRY = 'ENTRY',
+  ACTIVE = 'ACTIVE',
+  PROFITABLE = 'PROFITABLE',
+  PROFIT_PROTECTION = 'PROFIT_PROTECTION',
+  TRAILING = 'TRAILING',
+}
+
+export enum OrderSide {
+  BUY = 'BUY',
+  SELL = 'SELL',
+}
+
+export enum BrokerOrderStatus {
+  ORDER_REQUESTED = 'ORDER_REQUESTED',
+  ORDER_PLACED = 'ORDER_PLACED',
+  ORDER_OPEN = 'ORDER_OPEN',
+  PARTIALLY_FILLED = 'PARTIALLY_FILLED',
+  FILLED = 'FILLED',
+  REJECTED = 'REJECTED',
+  CANCELLED = 'CANCELLED',
+}
+
+export enum OrderSource {
+  OMS = 'OMS',
+  HUMAN = 'HUMAN',
+  AI = 'AI',
 }

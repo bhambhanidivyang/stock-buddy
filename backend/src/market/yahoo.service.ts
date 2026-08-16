@@ -11,12 +11,26 @@ export interface PriceQuote {
   volume: number | null;
   open: number | null;
   gapPercent: number | null;
+  bid: number | null;
+  ask: number | null;
+  /** Vendor/exchange time when present. */
+  quotedAt: Date | null;
+  receivedAt: Date;
 }
 
 export type DailyBar = {
   close: number;
   high: number;
   low: number;
+  volume: number;
+};
+
+export type IntradayBar = {
+  ts: Date;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
   volume: number;
 };
 
@@ -61,6 +75,7 @@ export class YahooService {
 
   async getQuote(symbol: string): Promise<PriceQuote | null> {
     const yahooSymbol = toYahooSymbol(symbol);
+    const receivedAt = new Date();
     try {
       const quote = await this.yahoo.quote(yahooSymbol);
       const price =
@@ -95,6 +110,8 @@ export class YahooService {
         open != null && previousClose
           ? ((open - previousClose) / previousClose) * 100
           : null;
+      const bid = typeof quote.bid === 'number' ? quote.bid : null;
+      const ask = typeof quote.ask === 'number' ? quote.ask : null;
 
       return {
         symbol: symbol.replace(/\.NS$/i, '').toUpperCase(),
@@ -104,6 +121,10 @@ export class YahooService {
         volume,
         open,
         gapPercent,
+        bid,
+        ask,
+        quotedAt: toQuoteDate(quote.regularMarketTime),
+        receivedAt,
       };
     } catch (error) {
       this.logger.warn(
@@ -177,6 +198,44 @@ export class YahooService {
     } catch (error) {
       this.logger.warn(
         `History failed for ${yahooSymbol}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
+  }
+
+  async getIntradayBars(
+    symbol: string,
+    interval: '1m' | '5m',
+    lookbackMinutes = 120,
+  ): Promise<IntradayBar[]> {
+    const yahooSymbol = toYahooSymbol(symbol);
+    const period1 = new Date(Date.now() - lookbackMinutes * 60_000);
+    try {
+      const result = await this.yahoo.chart(yahooSymbol, {
+        period1,
+        period2: new Date(),
+        interval,
+      });
+      return (result.quotes ?? [])
+        .filter(
+          (r) =>
+            r.date instanceof Date &&
+            typeof r.close === 'number' &&
+            typeof r.high === 'number' &&
+            typeof r.low === 'number' &&
+            typeof r.open === 'number',
+        )
+        .map((r) => ({
+          ts: r.date as Date,
+          open: r.open as number,
+          high: r.high as number,
+          low: r.low as number,
+          close: r.close as number,
+          volume: typeof r.volume === 'number' ? r.volume : 0,
+        }));
+    } catch (error) {
+      this.logger.warn(
+        `Intraday ${interval} failed for ${yahooSymbol}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return [];
     }
@@ -280,6 +339,18 @@ export class YahooService {
       },
     };
   }
+}
+
+function toQuoteDate(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const ms = value < 1e12 ? value * 1000 : value;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  return null;
 }
 
 export async function mapPool<T>(

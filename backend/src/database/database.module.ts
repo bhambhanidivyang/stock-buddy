@@ -6,8 +6,10 @@ import { User } from '../auth/entities/user.entity';
 import {
   Account,
   ActivityLog,
+  BrokerOrder,
   ExecutionSession,
   MarketBhavDaily,
+  PositionManagementDecision,
   RecommendationItem,
   RecommendationRun,
   SchedulerRun,
@@ -21,6 +23,7 @@ import { AddSchedulerRuns1754700000000 } from './migrations/1754700000000-AddSch
 import { AddAccountUserId1754800000000 } from './migrations/1754800000000-AddAccountUserId';
 import { AllowMultipleTradesPerItem1754900000000 } from './migrations/1754900000000-AllowMultipleTradesPerItem';
 import { AddActivityLogs1755000000000 } from './migrations/1755000000000-AddActivityLogs';
+import { AddLivePositionManagement1755100000000 } from './migrations/1755100000000-AddLivePositionManagement';
 import { AddUniverseAndBhav1754500000000 } from './migrations/1754500000000-AddUniverseAndBhav';
 import { CreateUsers1754040000000 } from './migrations/1754040000000-CreateUsers';
 import { InitSchema1753470000000 } from './migrations/1753470000000-InitSchema';
@@ -51,6 +54,8 @@ import { InitSchema1753470000000 } from './migrations/1753470000000-InitSchema';
           UniverseSnapshot,
           UniverseSymbolRow,
           MarketBhavDaily,
+          BrokerOrder,
+          PositionManagementDecision,
         ],
         synchronize: false,
         migrationsRun: true,
@@ -64,6 +69,7 @@ import { InitSchema1753470000000 } from './migrations/1753470000000-InitSchema';
           AddAccountUserId1754800000000,
           AllowMultipleTradesPerItem1754900000000,
           AddActivityLogs1755000000000,
+          AddLivePositionManagement1755100000000,
         ],
       }),
     }),
@@ -80,6 +86,8 @@ import { InitSchema1753470000000 } from './migrations/1753470000000-InitSchema';
       UniverseSnapshot,
       UniverseSymbolRow,
       MarketBhavDaily,
+      BrokerOrder,
+      PositionManagementDecision,
     ]),
   ],
   exports: [TypeOrmModule],

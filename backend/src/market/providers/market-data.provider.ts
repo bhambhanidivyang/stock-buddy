@@ -1,6 +1,6 @@
-import type { DailyBar, PriceQuote } from '../yahoo.service';
+import type { DailyBar, IntradayBar, PriceQuote } from '../yahoo.service';
 
-/** Swappable market data plane (Yahoo today, paid API later). */
+/** Research plane — historical + delayed quotes are acceptable. */
 export interface MarketDataProvider {
   readonly name: string;
   getQuote(symbol: string): Promise<PriceQuote | null>;
@@ -10,3 +10,14 @@ export interface MarketDataProvider {
 }
 
 export const MARKET_DATA_PROVIDER = Symbol('MARKET_DATA_PROVIDER');
+
+/** Execution plane — freshness and intraday bars matter. */
+export interface LiveMarketDataProvider extends MarketDataProvider {
+  getIntradayBars(
+    symbol: string,
+    interval: '1m' | '5m',
+    lookbackMinutes?: number,
+  ): Promise<IntradayBar[]>;
+}
+
+export const LIVE_MARKET_DATA_PROVIDER = Symbol('LIVE_MARKET_DATA_PROVIDER');

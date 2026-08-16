@@ -12,6 +12,7 @@ import { PortfolioModule } from './portfolio/portfolio.module';
 import { RecommendationsModule } from './recommendations/recommendations.module';
 import { AuthModule } from './auth/auth.module';
 import { JobsModule } from './jobs/jobs.module';
+import { LiveModule } from './live/live.module';
 import { StatementModule } from './statement/statement.module';
 import { ActivityLogsModule } from './activity-logs/activity-logs.module';
 
@@ -26,6 +27,7 @@ import { ActivityLogsModule } from './activity-logs/activity-logs.module';
     AiModule,
     RecommendationsModule,
     ExecuteModule,
+    LiveModule,
     BalanceModule,
     PortfolioModule,
     AuthModule,

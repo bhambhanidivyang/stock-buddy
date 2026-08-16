@@ -9,6 +9,7 @@ import {
   RecommendationRun,
   Trade,
 } from '../database/entities';
+import { LiveModule } from '../live/live.module';
 import { MarketModule } from '../market/market.module';
 import { ExecuteController } from './execute.controller';
 import { ExecuteService } from './execute.service';
@@ -19,6 +20,7 @@ import { ExecutionLoopService } from './execution-loop.service';
     AccountModule,
     ActivityLogsModule,
     MarketModule,
+    LiveModule,
     TypeOrmModule.forFeature([
       Account,
       RecommendationRun,

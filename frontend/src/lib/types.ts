@@ -349,7 +349,10 @@ export type ExecuteStopResult =
   | { status: "IDLE" }
   | { status: "STOPPED"; sessionId: string; stopReason?: string };
 
-export type ActivityLogCategory = "RECOMMENDATION" | "EXECUTION";
+export type ActivityLogCategory =
+  | "RECOMMENDATION"
+  | "EXECUTION"
+  | "POSITION_MANAGEMENT";
 
 export type ActivityLogEvent = {
   id: string;

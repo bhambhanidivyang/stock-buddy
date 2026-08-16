@@ -46,7 +46,7 @@ export class ActivityLogsService {
     const rows = await this.logs.find({
       where: { accountId: account.id },
       order: { createdAt: 'DESC' },
-      take: takeDays * 80,
+      take: takeDays * 200,
     });
 
     const byDay = new Map<
