@@ -32,3 +32,55 @@ export function humanizeWatchReason(
   if (!text) return "Not attractive to buy at the current price";
   return text;
 }
+
+const AI_ACTION_COPY: Record<
+  string,
+  { label: string; detail: string; tone: string }
+> = {
+  HOLD: {
+    label: "Hold",
+    detail: "Leave the trade as-is",
+    tone: "bg-stone-100 text-stone-800",
+  },
+  PROTECT_PROFIT: {
+    label: "Protect profit",
+    detail: "Raise the stop toward breakeven",
+    tone: "bg-amber-100 text-amber-950",
+  },
+  MOVE_STOP: {
+    label: "Tighten stop",
+    detail: "Move the stop up with the price",
+    tone: "bg-sky-100 text-sky-950",
+  },
+  EXIT_NOW: {
+    label: "Exit now",
+    detail: "Sell the position at the live mark",
+    tone: "bg-rose-100 text-rose-950",
+  },
+  TAKE_PARTIAL_PROFIT: {
+    label: "Take partial profit",
+    detail: "Sell some quantity (blocked until a size policy exists)",
+    tone: "bg-teal-100 text-teal-950",
+  },
+};
+
+export function humanizeAiAction(action: string | null | undefined): {
+  label: string;
+  detail: string;
+  tone: string;
+} {
+  const key = String(action ?? "").trim().toUpperCase();
+  return (
+    AI_ACTION_COPY[key] ?? {
+      label: key.replace(/_/g, " ").toLowerCase() || "Review",
+      detail: "",
+      tone: "bg-stone-100 text-stone-800",
+    }
+  );
+}
+
+export function humanizeAiTrigger(triggeredBy: string | null | undefined): string {
+  const key = String(triggeredBy ?? "").trim().toUpperCase();
+  if (key === "EVENT") return "Market event";
+  return "Scheduled check";
+}

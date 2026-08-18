@@ -53,6 +53,17 @@ type CyclePositionSummary = {
   confidence: number;
   ltp: number;
   pnlPct: number;
+  pnl: number;
+  qty: number;
+  entryPrice: number;
+  currentStop: number;
+  currentTarget: number;
+  suggestedStop: number | null;
+  suggestedExitPrice: number | null;
+  appliedStop: number | null;
+  fillPrice: number | null;
+  fillQty: number | null;
+  events: Array<{ type: string; message: string }>;
 };
 
 @Injectable()
@@ -343,21 +354,18 @@ export class PositionManagementService {
       }
     }
 
-    const lines = summaries
-      .filter((s): s is CyclePositionSummary => s != null)
-      .map((s) => `${s.symbol} ${s.action}${s.allow ? '' : ' BLOCKED'}`)
-      .join('; ');
+    const kept = summaries.filter((s): s is CyclePositionSummary => s != null);
     await this.activityLogs.append({
       accountId: input.accountId,
       category: 'POSITION_MANAGEMENT',
       eventCode: 'PM_REVIEW',
-      message: `AI Review (${input.triggeredBy}): ${lines}`,
+      message: reviewActivityMessage(input.triggeredBy, kept),
       refId: null,
       meta: {
         triggeredBy: input.triggeredBy,
         promptHash: aiResult.promptHash,
         portfolioSummary: aiResult.response.portfolioSummary,
-        positions: summaries.filter((s): s is CyclePositionSummary => s != null),
+        positions: kept,
       },
     });
   }
@@ -573,6 +581,17 @@ export class PositionManagementService {
       confidence: input.decision.confidence,
       ltp: input.snapshot.currentLtp,
       pnlPct: input.snapshot.currentPnlPct,
+      pnl: input.snapshot.currentPnl,
+      qty: input.snapshot.qty,
+      entryPrice: input.snapshot.entryPrice,
+      currentStop: input.snapshot.currentStop,
+      currentTarget: input.snapshot.currentTarget,
+      suggestedStop: input.decision.suggestedStop,
+      suggestedExitPrice: input.decision.suggestedExitPrice,
+      appliedStop: input.verdict.effectiveStop,
+      fillPrice: input.fillPrice ?? null,
+      fillQty: input.fillQty ?? null,
+      events: input.events.map((e) => ({ type: e.type, message: e.message })),
     };
   }
 }
@@ -599,6 +618,40 @@ function toTradeInput(trade: Trade): TradeSnapshotInput {
       trade.maxUnrealizedPct != null ? toNumber(trade.maxUnrealizedPct) : null,
     summary: trade.summary,
   };
+}
+
+function humanActionLabel(action: string): string {
+  switch (action) {
+    case 'HOLD':
+      return 'keep holding';
+    case 'PROTECT_PROFIT':
+      return 'protect profit';
+    case 'MOVE_STOP':
+      return 'tighten the stop';
+    case 'EXIT_NOW':
+      return 'exit now';
+    case 'TAKE_PARTIAL_PROFIT':
+      return 'take partial profit';
+    default:
+      return action.toLowerCase().replace(/_/g, ' ');
+  }
+}
+
+function reviewActivityMessage(
+  triggeredBy: string,
+  summaries: CyclePositionSummary[],
+): string {
+  const when =
+    triggeredBy === 'EVENT' ? 'Event-driven review' : 'Scheduled review';
+  if (summaries.length === 0) {
+    return `${when}: no open positions.`;
+  }
+  const parts = summaries.map((s) => {
+    const pnl = `${s.pnlPct >= 0 ? '+' : ''}${s.pnlPct.toFixed(2)}%`;
+    const applied = s.allow ? '' : ', not applied';
+    return `${s.symbol} — ${humanActionLabel(s.action)}${applied} (₹${s.ltp.toFixed(2)}, ${pnl})`;
+  });
+  return `${when}: ${parts.join('; ')}`;
 }
 
 function oldestReview(trades: Trade[]): number {
