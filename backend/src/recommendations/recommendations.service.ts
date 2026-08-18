@@ -1169,6 +1169,7 @@ function humanizeReasonCode(code: string | null | undefined): string | null {
     NO_VALID_ENTRY: 'No clear buy zone from chart structure right now',
     ENTRY_TOO_EXTENDED: 'Price already ran past a sensible buy zone',
     TARGET_TOO_CLOSE: 'Upside to next resistance is too small vs risk',
+    TARGET_TOO_FAR: 'Target is too far for a 1–5 day swing',
     NO_STRUCTURAL_TARGET: 'No clear sell target from chart structure',
     EXCESSIVE_RISK: 'Risk is too high for this account',
     INVALID_DATA: 'Market data missing or unreliable',
@@ -1215,6 +1216,9 @@ function humanizeRejectReason(raw: string): string {
   }
   if (/TARGET_TOO_CLOSE|RR_TOO_LOW/i.test(text)) {
     return 'Target/resistance too close for attractive risk/reward';
+  }
+  if (/TARGET_TOO_FAR/i.test(text)) {
+    return 'Target is too far for a 1–5 day swing';
   }
   if (/NO_STRUCTURAL_TARGET|NO_TARGET|TARGET_NOT_ABOVE|TARGET_UNREALISTIC/i.test(
     text,

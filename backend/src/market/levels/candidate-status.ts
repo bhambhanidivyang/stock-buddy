@@ -14,6 +14,7 @@ export type StatusReasonCode =
   | 'ENTRY_TOO_EXTENDED'
   | 'STOP_TOO_WIDE'
   | 'TARGET_TOO_CLOSE'
+  | 'TARGET_TOO_FAR'
   | 'NO_STRUCTURAL_TARGET'
   | 'EXCESSIVE_RISK'
   | 'INVALID_DATA'
@@ -48,6 +49,7 @@ export function mapRejectionToReasonCode(
   if (code === 'NO_STOP_STRUCTURE') return 'NO_VALID_ENTRY';
   if (code === 'NO_TARGET_STRUCTURE') return 'NO_STRUCTURAL_TARGET';
   if (code === 'TARGET_TOO_CLOSE') return 'TARGET_TOO_CLOSE';
+  if (code === 'TARGET_TOO_FAR') return 'TARGET_TOO_FAR';
   if (code === 'TARGET_NOT_ABOVE_ENTRY' || code === 'TARGET_UNREALISTIC_HORIZON') {
     return 'NO_STRUCTURAL_TARGET';
   }

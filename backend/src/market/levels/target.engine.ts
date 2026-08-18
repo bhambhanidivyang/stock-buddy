@@ -129,13 +129,17 @@ export function buildTarget(input: {
       continue;
     }
     const rewardAtr = (c.price - buyHigh) / atr;
-    if (rewardAtr > config.maxTargetAtr) {
+    const rewardPct = buyHigh > 0 ? (c.price - buyHigh) / buyHigh : 0;
+    if (
+      rewardAtr > config.maxTargetAtr ||
+      rewardPct > config.maxTargetPct
+    ) {
       evaluated.push({
         price: c.price,
         reason: c.reason,
         rr: null,
         accepted: false,
-        skipReason: 'TARGET_UNREALISTIC_HORIZON',
+        skipReason: 'TARGET_TOO_FAR',
       });
       continue;
     }
@@ -201,6 +205,19 @@ export function buildTarget(input: {
       riskReward: round(bestSoft.rr, 2),
       risk: round(risk, 4),
       reward: round(bestSoft.reward, 4),
+    };
+  }
+
+  const far = evaluated.filter((e) => e.skipReason === 'TARGET_TOO_FAR');
+  if (far.length > 0) {
+    const farthest = [...far].sort((a, b) => b.price - a.price)[0];
+    return {
+      ok: false,
+      code: 'TARGET_TOO_FAR',
+      message: `structural target ${farthest.price} is beyond strategy horizon ${config.maxTargetPct} / ${config.maxTargetAtr}ATR`,
+      targetsEvaluated: evaluated,
+      risk: round(risk, 4),
+      reward: round(farthest.price - buyHigh, 4),
     };
   }
 

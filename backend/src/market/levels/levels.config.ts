@@ -40,6 +40,11 @@ export type LevelsConfig = {
   maxStopPctAmber: number;
   /** Absolute hard reject stop width (never amber above this). */
   maxStopPctHard: number;
+  /**
+   * Strategy BUYABLE risk budget as a fraction of buyHigh.
+   * Structural stop is not tightened to fit this — the plan is rejected.
+   */
+  maxRiskPct: number;
   /** Expands green/amber stop ceilings: max(pctKnob, mult * ATR/buyHigh). */
   stopAdaptiveAtrMult: number;
   /** Green max stop width in ATR units. */
@@ -51,7 +56,13 @@ export type LevelsConfig = {
   /** Amber minimum risk/reward (below green, still buyable for AI). */
   minTargetRrAmber: number;
   maxResistanceTargets: number;
+  /** Max BUYABLE target distance in ATR (horizon sanity check). */
   maxTargetAtr: number;
+  /**
+   * Strategy BUYABLE target distance as a fraction of buyHigh.
+   * Distant impulse projections are skipped/rejected, not clamped.
+   */
+  maxTargetPct: number;
   /** Sessions after buyAt before time-stop. */
   maxHoldSessions: number;
 };
@@ -116,6 +127,7 @@ export function loadLevelsConfig(
     maxStopPctReject: requireNum(env, 'LVL_MAX_STOP_PCT_REJECT'),
     maxStopPctAmber: requireNum(env, 'LVL_MAX_STOP_PCT_AMBER'),
     maxStopPctHard: requireNum(env, 'LVL_MAX_STOP_PCT_HARD'),
+    maxRiskPct: requireNum(env, 'LVL_MAX_RISK_PCT'),
     stopAdaptiveAtrMult: requireNum(env, 'LVL_STOP_ADAPTIVE_ATR_MULT'),
     maxStopAtrReject: requireNum(env, 'LVL_MAX_STOP_ATR_REJECT'),
     maxStopAtrAmber: requireNum(env, 'LVL_MAX_STOP_ATR_AMBER'),
@@ -126,6 +138,7 @@ export function loadLevelsConfig(
       Math.floor(requireNum(env, 'LVL_MAX_RESISTANCE_TARGETS')),
     ),
     maxTargetAtr: requireNum(env, 'LVL_MAX_TARGET_ATR'),
+    maxTargetPct: requireNum(env, 'LVL_MAX_TARGET_PCT'),
     maxHoldSessions: Math.max(
       1,
       Math.floor(requireNum(env, 'LVL_MAX_HOLD_SESSIONS')),

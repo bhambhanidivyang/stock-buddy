@@ -13,6 +13,7 @@ import { buildStop } from './stop.engine';
 import { resolveStructureSetup } from './structure-entry';
 import { buildStructureLevels, nearestSupportBelow } from './structure';
 import { buildTarget } from './target.engine';
+import { assertStrategyGeometry } from './trade-geometry';
 import type { RejectionDetail, SuggestedLevels, TradePlan } from './types';
 
 export type TradePlanInput = {
@@ -221,6 +222,55 @@ export function buildTradePlan(input: TradePlanInput): TradePlan {
     config,
   });
 
+  const attemptedTarget = target.ok
+    ? target.sellTarget
+    : maxEvaluatedTarget(target.targetsEvaluated);
+
+  const geometry = assertStrategyGeometry({
+    buyHigh: entry.buyHigh,
+    stopLoss: stop.stopLoss,
+    sellTarget: attemptedTarget,
+    atr,
+    config,
+  });
+
+  if (!geometry.ok) {
+    return rejected({
+      setupType: setup.setupType,
+      buyLow: entry.buyLow,
+      buyHigh: entry.buyHigh,
+      entryReason: entry.entryReason,
+      stopReason: stop.stopReason,
+      stopLoss: stop.stopLoss,
+      sellTarget: attemptedTarget ?? 0,
+      atrUsed: round(atr, 4),
+      breakLevel: setup.breakLevel,
+      risk: entry.buyHigh - stop.stopLoss,
+      reward:
+        attemptedTarget != null ? attemptedTarget - entry.buyHigh : 0,
+      riskReward: target.ok ? target.riskReward : (target.rr ?? 0),
+      rejectionCode: geometry.code,
+      rejectionDetail: {
+        setupType: setup.setupType,
+        message: geometry.message,
+        buyHigh: entry.buyHigh,
+        stopLoss: stop.stopLoss,
+        sellTargetTried: attemptedTarget ?? undefined,
+        stopStructurePrice: stop.structurePrice,
+        rr: target.ok ? target.riskReward : target.rr,
+        requiredRr: config.minTargetRrAmber,
+        risk: entry.buyHigh - stop.stopLoss,
+        reward:
+          attemptedTarget != null ? attemptedTarget - entry.buyHigh : undefined,
+        targetsEvaluated: target.targetsEvaluated,
+        atrUsed: round(atr, 4),
+        entryOvershootAtr: entry.overshootAtr,
+        riskPct: geometry.riskPct,
+        riskAtr: stop.riskAtr,
+      },
+    });
+  }
+
   if (!target.ok) {
     return rejected({
       setupType: setup.setupType,
@@ -343,3 +393,12 @@ export function toSuggestedLevels(plan: TradePlan): SuggestedLevels | null {
 }
 
 export type { PlanQuality };
+
+function maxEvaluatedTarget(
+  evaluated: Array<{ price: number }> | undefined,
+): number | null {
+  if (evaluated == null || evaluated.length === 0) {
+    return null;
+  }
+  return evaluated.reduce((m, e) => (e.price > m ? e.price : m), 0) || null;
+}

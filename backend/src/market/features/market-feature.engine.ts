@@ -498,6 +498,7 @@ export class MarketFeatureEngine {
         'NO_VALID_ENTRY',
         'ENTRY_TOO_EXTENDED',
         'TARGET_TOO_CLOSE',
+        'TARGET_TOO_FAR',
         'NO_STRUCTURAL_TARGET',
       ];
       let other = 0;

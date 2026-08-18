@@ -87,5 +87,6 @@ describe('mapRejectionToReasonCode', () => {
     expect(mapRejectionToReasonCode('NO_TARGET_STRUCTURE')).toBe(
       'NO_STRUCTURAL_TARGET',
     );
+    expect(mapRejectionToReasonCode('TARGET_TOO_FAR')).toBe('TARGET_TOO_FAR');
   });
 });

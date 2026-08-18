@@ -9,7 +9,7 @@ import {
 
 export const SCHEMA_VERSION = 1;
 export const FEATURE_VERSION = 3;
-export const CONFIG_VERSION = 6;
+export const CONFIG_VERSION = 7;
 export const PROMPT_VERSION = 'portfolio-manager-v9-ratio-deploy';
 
 export type StrategyProfile = 'day' | 'swing';
